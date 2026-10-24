@@ -1,0 +1,5 @@
+{
+  "name": "claude-desktop-usage-widget",
+  "owner": { "name": "ecopado" },
+  "plugins": [{ "name": "usage-widget", "source": "./" }]
+}

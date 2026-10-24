@@ -1,0 +1,6 @@
+{
+  "name": "usage-widget",
+  "version": "0.4.1",
+  "description": "A calm usage strip above the prompt — context, your plan's 5-hour and weekly limits (or a work seat's monthly spend) with pace, and what this chat cost — plus a Usage pane with resets, projections and the context trend.",
+  "types": "./types/index.d.ts"
+}
