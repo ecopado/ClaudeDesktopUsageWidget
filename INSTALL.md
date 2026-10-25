@@ -55,28 +55,32 @@ account's limits, switching by itself when you change account.
    ```json
    {
      "env": {
-       "CLAUDE_CODE_PLUGIN_DIRS": "~/.claude/mods/usage-widget",
-       "CLAUDE_CODE_PLUGIN_DIR_WATCH": "1"
+       "CLAUDE_CODE_PLUGIN_DIRS": "~/.claude/mods/usage-widget"
      }
    }
    ```
 
    To load several mods, separate their paths with `;` on Windows or `:` on macOS.
-   `CLAUDE_CODE_PLUGIN_DIR_WATCH` is what makes the desktop app reload the mod when you edit
-   it; without it the app only reads the folder at startup, so every change needs a restart.
 
 3. Quit and reopen the Claude desktop app. The widget appears above the prompt in the Code tab
    in new sessions. Terminal sessions load it too, when `claude --version` is 2.1.288 or later.
 
 ### Upgrading
 
-Replace your `usage-widget` folder with the new one. Open sessions reload it by themselves
-(that's `CLAUDE_CODE_PLUGIN_DIR_WATCH`); otherwise open a new session.
+Replace your `usage-widget` folder with the new one, then open a new session or restart the app.
+
+### Editing the widget yourself
+
+While you change the widget's code, add `"CLAUDE_CODE_PLUGIN_DIR_WATCH": "1"` to the same `env`
+block. Every open session then reloads the widget whenever a file in its folder changes, with no
+restart. Each reload also prints a dim `usage-widget reloaded (…)` line in every open chat, so
+remove the setting again once you're done. Keep a git checkout out of the folder you load while
+the watch is on: every commit or pull counts as a change.
 
 ### Uninstalling
 
-Remove the two `CLAUDE_CODE_PLUGIN_DIR…` lines from `~/.claude/settings.json` (or just this
-mod's path, if you load several), delete the `usage-widget` folder, and restart the app.
+Remove the `CLAUDE_CODE_PLUGIN_DIRS` line from `~/.claude/settings.json` (or just this mod's
+path, if you load several), delete the `usage-widget` folder, and restart the app.
 
 ## What's new in 0.4.1
 
