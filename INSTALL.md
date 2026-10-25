@@ -82,6 +82,14 @@ the watch is on: every commit or pull counts as a change.
 Remove the `CLAUDE_CODE_PLUGIN_DIRS` line from `~/.claude/settings.json` (or just this mod's
 path, if you load several), delete the `usage-widget` folder, and restart the app.
 
+## What's new in 0.4.2
+
+- The install steps no longer turn on `CLAUDE_CODE_PLUGIN_DIR_WATCH`. With it on, every open chat
+  printed a `usage-widget reloaded (…)` line whenever anything in the widget's folder changed.
+  It's now an optional setting for when you edit the widget yourself (see "Editing the widget
+  yourself"). If you installed an earlier version, remove that line from your settings to stop
+  the reload lines. The widget itself is unchanged.
+
 ## What's new in 0.4.1
 
 - The 5-hour and weekly limits (or a work seat's monthly spend) no longer drop out of the strip
