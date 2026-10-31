@@ -1,17 +1,36 @@
 import { atom, read, update } from 'claude-code'
-import type { BoxProps, ElementConstructor, EngineInterface, McpToolResult, Register, SessionUsage, TextProps } from 'claude-code'
+import type {
+  BoxProps,
+  ConfigValue,
+  ElementConstructor,
+  EngineInterface,
+  McpToolResult,
+  PluginOptions,
+  Register,
+  SessionUsage,
+  TextProps,
+} from 'claude-code'
 
-import type { HistoryPoint, PlanUsage, SpendLimit, UsageLimit, UsageSnapshot } from '../types'
+import type { HistoryPoint, MonthSpend, PlanUsage, SpendLimit, UsageLimit, UsageSnapshot } from '../types'
 
 const snapshot = atom({ plugin: 'usage-widget', key: 'snapshot' } as const, null)
 const plan = atom({ plugin: 'usage-widget', key: 'plan' } as const, null)
 const history = atom({ plugin: 'usage-widget', key: 'history' } as const, [])
 const isPaneOpen = atom({ plugin: 'usage-widget', key: 'isPaneOpen' } as const, false)
+const monthSpend = atom({ plugin: 'usage-widget', key: 'monthSpend' } as const, null)
+const settingError = atom({ plugin: 'usage-widget', key: 'settingError' } as const, null)
 
 const STORE_PANE = 'isPaneOpen'
 // The card last read, kept across sessions: a session the app starts afresh (coming back to a
 // chat, a new one) shows the plan's limits from its first draw, held, until it reads its own.
 const STORE_PLAN = 'plan'
+// What each conversation has cost in each UTC month, under `spend:<month>:<startedAt>`: one key a
+// conversation, which only it writes, so chats running side by side never overwrite each other.
+// `startedAt` holds across a resume, whose cost carries on from the run before, and starts over on
+// /clear, whose cost does too; a session id would count a resumed chat twice.
+const SPEND = 'spend:'
+// When the widget first counted spend: a month that began before it is counted from there.
+const STORE_SPEND_SINCE = 'spendSince'
 const REFRESH_MS = 60_000
 
 const MINUTE = 60_000
@@ -23,6 +42,35 @@ const DAY = 24 * HOUR
 const PANE = 'usage'
 const PANE_TITLE = 'Usage'
 const COMMAND = 'usage-pane'
+
+// The options `register` receives, as the manifest's `userConfig` declares them. The pane's
+// Customize section changes them through `$.config.set`, as the /config menu does, under these
+// keys; either way the engine stores them in settings and reloads the module with the new values.
+const OPTION = {
+  strip: 'usage-widget.strip',
+  showContext: 'usage-widget.showContext',
+  showCost: 'usage-widget.showCost',
+  monthlyBudget: 'usage-widget.monthlyBudget',
+}
+
+// Which plan limits each choice of `strip` shows; `All` shows every one the account reports.
+const STRIP_GROUPS: Record<string, readonly Group[]> = {
+  '5-hour and weekly': ['five', 'weekly'],
+  '5-hour and monthly': ['five', 'monthly'],
+  'Weekly and monthly': ['weekly', 'monthly'],
+  'Monthly only': ['monthly'],
+}
+const STRIP_CHOICES = ['All', ...Object.keys(STRIP_GROUPS)]
+
+type Group = 'five' | 'weekly' | 'monthly' | 'other'
+
+type Prefs = {
+  strip: string
+  showContext: boolean
+  showCost: boolean
+  /** In US dollars; 0 for none. */
+  monthlyBudget: number
+}
 
 // The trend line keeps this many readings: enough for a long chat, little enough to redraw.
 const HISTORY_MAX = 60
@@ -71,6 +119,7 @@ const HUE = {
   purple: '#7F77DD',
   teal: '#1D9E75',
   pink: '#D4537E',
+  green: '#639922',
   warning: '#EF9F27',
   danger: '#E24B4A',
   neutral: '#888780',
@@ -84,11 +133,14 @@ const WINDOWS: Record<string, { title: string; short: string; rank: number; colo
   seven_day: { title: 'Weekly limit', short: 'Weekly', rank: 1, color: HUE.teal, span: 7 * DAY },
   seven_day_opus: { title: 'Weekly limit · Opus', short: 'Opus', rank: 2, color: HUE.teal, span: 7 * DAY },
   seven_day_sonnet: { title: 'Weekly limit · Sonnet', short: 'Sonnet', rank: 3, color: HUE.teal, span: 7 * DAY },
-  spend_limit: { title: 'Monthly limit', short: 'Monthly', rank: 4, color: HUE.purple },
+  spend_limit: { title: 'Monthly limit', short: 'Monthly', rank: 4, color: HUE.pink },
 }
 
 const TOGGLE_OPEN = 'Details'
 const TOGGLE_CLOSE = 'Hide details'
+
+// Where a monthly meter was chosen and the account reports no monthly figure of its own.
+const MONTHLY_MISSING = 'Monthly: set a budget in Details'
 
 // The desktop's footnote type is narrower than a cell: about this many cells a letter.
 const CELLS_PER_CHAR = 0.9
@@ -133,9 +185,13 @@ type Meter = {
   source: 'engine' | 'card'
   /** One sentence for the bar's tooltip and for a reader that cannot see it. */
   detail: string
+  /** A line the pane draws under the meter: where an estimated figure comes from. */
+  note?: string
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  const prefs = prefsOf(options)
+
   on('session.start', async ($, e, next) => {
     // Keeps the reset countdowns current between measurements; the read itself is free,
     // and a missed one just leaves the last figures up until the next.
@@ -219,15 +275,18 @@ export const register: Register = on => {
 
     const account = await read($, plan)
     const paneOpen = await read($, isPaneOpen)
+    const spend = await read($, monthSpend)
     const elements = $.ui.resolve(e)
     const { Box, Button, Text } = elements
     // The desktop draws each bar as a small vector strip, so it can be thin and carry a tick;
     // the terminal has no Svg (its table's entry draws an empty fragment) and draws cells.
     const Svg = e.surface === 'terminal' || !('Svg' in elements) ? undefined : elements.Svg
-    const meters = metersOf(usage, account, isCardHeld())
+    const strip = stripOf(metersOf(usage, account, isCardHeld(), budgetOf(prefs, spend)), prefs)
+    const meters = strip.shown
     const barred = meters.filter(hasBar)
     const cost = meters.find(meter => meter.key === 'cost')
     const held = heldFor(meters, usage, account)
+    const missing = strip.isMonthlyMissing ? MONTHLY_MISSING : undefined
     const columns = e.props.bodyColumns
     // On the desktop the button's words are a footnote Text, the size of the figures beside it,
     // not the Button's own larger type.
@@ -243,6 +302,7 @@ export const register: Register = on => {
       const tail =
         (cost === undefined ? 0 : textCells(`${cost.value} ${cost.short}`) + GAP_CELLS) +
         (held === undefined ? 0 : textCells(held) + GAP_CELLS) +
+        (missing === undefined ? 0 : textCells(missing) + GAP_CELLS) +
         toggleLabel.length +
         4
       const room = columns - 2 - tail
@@ -286,6 +346,11 @@ export const register: Register = on => {
               {held}
             </Text>
           )}
+          {missing !== undefined && (
+            <Text size="footnote" dimColor wrap="truncate">
+              {missing}
+            </Text>
+          )}
           {cost !== undefined && (
             <Box flexDirection="row" columnGap={1}>
               <Text size="footnote" weight="medium" tabular>
@@ -305,7 +370,7 @@ export const register: Register = on => {
       )
     }
 
-    const layout = compactLayout(meters, columns, toggleLabel, held)
+    const layout = compactLayout(meters, columns, toggleLabel, [held, missing])
 
     return (
       <Box flexDirection="row" justifyContent="space-between" paddingX={1}>
@@ -335,6 +400,7 @@ export const register: Register = on => {
             )
           })}
           {held !== undefined && <Text dimColor>{held}</Text>}
+          {missing !== undefined && <Text dimColor>{missing}</Text>}
         </Box>
         <Button key="toggle" plain dimColor label={toggleLabel} onPress={toggle} />
       </Box>
@@ -353,8 +419,14 @@ export const register: Register = on => {
 
     const account = await read($, plan)
     const points = await read($, history)
-    const meters = metersOf(usage, account, isCardHeld())
+    const spend = await read($, monthSpend)
+    const error = await read($, settingError)
+    const meters = metersOf(usage, account, isCardHeld(), budgetOf(prefs, spend))
     const limits = meters.filter(hasBar).filter(meter => meter.key !== 'context')
+    // Pickers and fields where the surface draws them; the mobile app draws neither yet.
+    const Select = 'Select' in elements ? elements.Select : undefined
+    const Input = 'Input' in elements ? elements.Input : undefined
+    const ownMonthly = meters.find(meter => meter.key === 'spend_limit')
     const cost = meters.find(meter => meter.key === 'cost')
     const held = heldFor(meters, usage, account)
     const isCard = meters.some(meter => meter.source === 'card')
@@ -378,6 +450,24 @@ export const register: Register = on => {
         {title}
       </Text>
     )
+
+    // A change goes through as the /config menu's would: stored in settings, then the module
+    // reloads with it. One the engine refuses says why, under the controls, until the next goes in.
+    const setOption = (key: string, value: ConfigValue) =>
+      void $.config
+        .set({ key, value })
+        .then(result => update($, settingError, () => result.deny ?? null))
+        .catch(() => update($, settingError, () => "Couldn't save that setting."))
+
+    const saveBudget = (text: string) => {
+      const amount = budgetFrom(text)
+
+      if (amount === undefined) {
+        void update($, settingError, () => 'Enter an amount above $0, or leave it empty for none.').catch(() => undefined)
+      } else {
+        setOption(OPTION.monthlyBudget, amount)
+      }
+    }
 
     return (
       <Box flexDirection="column" rowGap={1}>
@@ -416,6 +506,11 @@ export const register: Register = on => {
                   </Text>
                 )}
               </Box>
+              {meter.note !== undefined && (
+                <Text size="footnote" dimColor wrap="wrap">
+                  {meter.note}
+                </Text>
+              )}
             </Box>
           )
         })}
@@ -468,6 +563,63 @@ export const register: Register = on => {
             <Button key="read-now" label="Read now" onPress={() => void refreshCard($, 0, true).catch(() => undefined)} />
           </Box>
         )}
+        {Select === undefined ? (
+          <Text size="footnote" dimColor wrap="wrap">
+            Choose what the strip shows in /config.
+          </Text>
+        ) : (
+          <Box key="pane-customize" flexDirection="column" rowGap={1}>
+            {section('Customize')}
+            <Select
+              key="strip"
+              label="Strip shows"
+              options={STRIP_CHOICES.map(value => ({ value }))}
+              value={prefs.strip}
+              onSelect={value => setOption(OPTION.strip, value)}
+            />
+            <Select
+              key="show-context"
+              label="Context"
+              options={SHOWN_CHOICES}
+              value={prefs.showContext ? 'shown' : 'hidden'}
+              onSelect={value => setOption(OPTION.showContext, value === 'shown')}
+            />
+            <Select
+              key="show-cost"
+              label="This chat's cost"
+              options={SHOWN_CHOICES}
+              value={prefs.showCost ? 'shown' : 'hidden'}
+              onSelect={value => setOption(OPTION.showCost, value === 'shown')}
+            />
+            {ownMonthly !== undefined && (
+              <Text size="footnote" dimColor wrap="wrap">
+                {ownMonthly.of === undefined
+                  ? "Monthly budget: using your account's own monthly limit."
+                  : `Monthly budget: using your account's own budget ${ownMonthly.of}.`}
+              </Text>
+            )}
+            {ownMonthly === undefined && Input !== undefined && (
+              <Input
+                key="budget"
+                label="Monthly budget ($)"
+                placeholder="None"
+                value={prefs.monthlyBudget > 0 ? String(prefs.monthlyBudget) : ''}
+                submitLabel="save"
+                onSubmit={saveBudget}
+              />
+            )}
+            {error !== null && (
+              <Text size="footnote" color="error" wrap="wrap">
+                {error}
+              </Text>
+            )}
+            {prefs.strip !== 'All' && (
+              <Text size="footnote" dimColor wrap="wrap">
+                A limit you've hidden comes back into the strip while it needs attention.
+              </Text>
+            )}
+          </Box>
+        )}
       </Box>
     )
   })
@@ -507,7 +659,142 @@ async function notePaneClosed($: EngineInterface, isMeant: boolean) {
 }
 
 async function refresh($: EngineInterface) {
-  await save($, await $.session.usage())
+  const usage = await $.session.usage()
+  await save($, usage)
+  await tallySpend($, usage).catch(() => undefined)
+}
+
+/**
+ * Records what this conversation has cost this month, then totals the month across every
+ * conversation the widget ran in: the figure a monthly budget is measured against.
+ *
+ * A conversation's cost runs on from its first launch, months included, so what it cost in an
+ * earlier month is taken off before the rest is set down for this one. Months before last are
+ * dropped. A conversation the widget never ran in, a claude.ai chat among them, is not counted.
+ */
+async function tallySpend($: EngineInterface, usage: SessionUsage) {
+  const now = await $.clock.now()
+  const month = monthKey(now)
+  const cost = usage.cost?.usd
+
+  if (cost !== undefined && cost > 0) {
+    const own = `${SPEND}${month}:${usage.startedAt}`
+    const earlier = (await $.store.keys()).filter(key => key.startsWith(SPEND) && key.endsWith(`:${usage.startedAt}`) && key !== own)
+    let before = 0
+
+    for (const key of earlier) {
+      before += amountOf(await $.store.get(key))
+    }
+
+    const here = Math.max(cost - before, 0)
+
+    if (amountOf(await $.store.get(own)) !== here) {
+      await $.store.set(own, here)
+    }
+
+    if (typeof (await $.store.get(STORE_SPEND_SINCE)) !== 'number') {
+      await $.store.set(STORE_SPEND_SINCE, now)
+    }
+  }
+
+  const oldest = monthKey(monthStart(now) - 1)
+  let usd = 0
+
+  for (const key of await $.store.keys()) {
+    if (!key.startsWith(SPEND)) {
+      continue
+    }
+
+    const keyMonth = key.slice(SPEND.length, SPEND.length + 7)
+
+    if (keyMonth < oldest) {
+      await $.store.delete(key)
+    } else if (keyMonth === month) {
+      usd += amountOf(await $.store.get(key))
+    }
+  }
+
+  const since = await $.store.get(STORE_SPEND_SINCE)
+  const total: MonthSpend = { month, usd: Math.round(usd * 1e6) / 1e6, since: typeof since === 'number' ? since : undefined }
+
+  // Asked for every minute in every chat: a redraw only when the month's figure moves.
+  await update($, monthSpend, last =>
+    last !== null && last.month === total.month && last.usd === total.usd && last.since === total.since ? last : total,
+  )
+}
+
+function amountOf(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+/** `2026-10`: the UTC month a figure belongs to, as a monthly cap resets on the first at midnight UTC. */
+function monthKey(at: number) {
+  return new Date(at).toISOString().slice(0, 7)
+}
+
+const SHOWN_CHOICES = [
+  { value: 'shown', label: 'Shown' },
+  { value: 'hidden', label: 'Hidden' },
+]
+
+/** A budget as typed: dollars, with or without a `$` or thousands commas; empty for none. */
+function budgetFrom(text: string): number | undefined {
+  const typed = text.trim().replace(/^\$/, '').replace(/,/g, '')
+
+  if (typed === '') {
+    return 0
+  }
+
+  const amount = Number(typed)
+
+  return Number.isFinite(amount) && amount >= 0 ? Math.round(amount * 100) / 100 : undefined
+}
+
+/** The options as `register` received them, each checked: a value of the wrong kind is its default. */
+function prefsOf(options: PluginOptions | undefined): Prefs {
+  const strip = options?.strip
+  const budget = options?.monthlyBudget
+
+  return {
+    strip: typeof strip === 'string' && STRIP_CHOICES.includes(strip) ? strip : 'All',
+    showContext: options?.showContext !== false,
+    showCost: options?.showCost !== false,
+    monthlyBudget: typeof budget === 'number' && Number.isFinite(budget) && budget > 0 ? budget : 0,
+  }
+}
+
+function groupOf(key: string): Group {
+  if (key === 'five_hour') return 'five'
+  if (key.startsWith('seven_day')) return 'weekly'
+  if (key === 'spend_limit' || key === 'budget') return 'monthly'
+
+  return 'other'
+}
+
+/** A limit the person should see whatever they chose: near it, or on pace to reach it. */
+function needsAttention(meter: Meter) {
+  return (meter.percent ?? 0) >= 75 || meter.isUrgent === true
+}
+
+/**
+ * What the strip shows, in order: the context, the plan limits the person chose, and this chat's
+ * cost, each as the options say. A chosen kind the account does not report leaves its place to
+ * the ones it does, so a work seat's monthly budget still shows under `5-hour and weekly`; a
+ * hidden limit comes back while it needs attention. `isMonthlyMissing` asks for a budget where a
+ * monthly meter was chosen and the account has no monthly figure of its own.
+ */
+function stripOf(meters: Meter[], prefs: Prefs) {
+  const context = meters.filter(meter => meter.key === 'context')
+  const cost = meters.filter(meter => meter.key === 'cost')
+  const limits = meters.filter(meter => meter.key !== 'context' && meter.key !== 'cost')
+  const wanted = STRIP_GROUPS[prefs.strip]
+  const chosen = wanted === undefined ? limits : limits.filter(meter => wanted.includes(groupOf(meter.key)))
+  const shown = chosen.length === 0 ? limits : limits.filter(meter => chosen.includes(meter) || needsAttention(meter))
+
+  return {
+    shown: [...(prefs.showContext ? context : []), ...shown, ...(prefs.showCost ? cost : [])],
+    isMonthlyMissing: wanted?.includes('monthly') === true && !limits.some(meter => groupOf(meter.key) === 'monthly'),
+  }
 }
 
 /**
@@ -785,11 +1072,20 @@ async function save($: EngineInterface, usage: Pick<SessionUsage, 'context' | 'r
   })
 }
 
+/** A budget the person set, and this month's spend to measure against it. */
+type Budget = { limit: number; spend: MonthSpend | null }
+
+function budgetOf(prefs: Prefs, spend: MonthSpend | null): Budget | undefined {
+  return prefs.monthlyBudget > 0 ? { limit: prefs.monthlyBudget, spend } : undefined
+}
+
 /**
  * The meters, in order. `isHeld` says the card's figures are held back: one of them whose window
- * has reset since it was read says nothing true any more, and shows no figure.
+ * has reset since it was read says nothing true any more, and shows no figure. `budget` adds a
+ * monthly meter where the account reports no monthly figure of its own; where it does, that one
+ * stands and the budget is set aside.
  */
-function metersOf(usage: UsageSnapshot, account: PlanUsage | null, isHeld = false): Meter[] {
+function metersOf(usage: UsageSnapshot, account: PlanUsage | null, isHeld = false, budget?: Budget): Meter[] {
   const spend = account?.spend ?? null
   const { context, measuredAt: now } = usage
   const percent = context.percent === undefined ? '—' : `${Math.round(context.percent)}%`
@@ -853,7 +1149,7 @@ function metersOf(usage: UsageSnapshot, account: PlanUsage | null, isHeld = fals
   // What the month has cost against the seat's cap: a work account's only usage limit, and
   // the one its settings page shows. Reported in money, so the figure reads as the card's.
   if (spend !== null && account !== null && isHeld && monthEnd(account.readAt) <= now) {
-    meters.push({ ...lapsed('spend_limit', 'Monthly', 'Monthly spend', HUE.purple), of: `of ${money(spend.limit, spend.currency)}` })
+    meters.push({ ...lapsed('spend_limit', 'Monthly', 'Monthly spend', HUE.pink), of: `of ${money(spend.limit, spend.currency)}` })
   } else if (spend !== null) {
     const end = monthEnd(now)
     const left = end - now
@@ -871,10 +1167,48 @@ function metersOf(usage: UsageSnapshot, account: PlanUsage | null, isHeld = fals
       value,
       of,
       ...timing(left, pace, ahead),
+      ...overBudget(spend.percentUsed),
       resets,
-      color: HUE.purple,
+      color: HUE.pink,
       source: 'card',
       detail: [`Monthly spend: ${value} ${of}.`, `${resets}.`, paceText(pace, ahead)].filter(Boolean).join(' '),
+    })
+  }
+
+  // A budget the person set, measured against what their chats cost this month: only where the
+  // account has no monthly figure of its own, which is always the truer one.
+  const hasMonthly = meters.some(meter => groupOf(meter.key) === 'monthly')
+
+  if (!hasMonthly && budget !== undefined && budget.limit > 0) {
+    const month = monthKey(now)
+    const spent = budget.spend?.month === month ? budget.spend.usd : 0
+    const since = budget.spend?.since
+    const percent = (spent / budget.limit) * 100
+    const end = monthEnd(now)
+    const left = end - now
+    const pace = paceOf(percent, left, end - monthStart(now))
+    const resets = `Resets ${clockTime(end, now)} · in ${countdown(left)}`
+    const value = money(spent, 'USD')
+    const of = `of ${money(budget.limit, 'USD')}`
+    const ahead = pace?.projected === undefined ? undefined : `~${money(Math.round(spent / (pace.elapsed / 100)), 'USD')} by reset`
+    const counted = since !== undefined && since > monthStart(now) ? ` since ${dayOf(since)}` : ' this month'
+
+    meters.push({
+      key: 'budget',
+      short: 'Monthly',
+      title: 'Monthly budget',
+      percent,
+      value,
+      of,
+      ...timing(left, pace, ahead),
+      ...overBudget(percent),
+      resets,
+      color: HUE.pink,
+      source: 'engine',
+      note: `Estimated at API rates across your Claude Code chats${counted}. Not what you're billed.`,
+      detail: [`Monthly budget: ${value} ${of}, estimated at API rates across your Claude Code chats${counted}.`, `${resets}.`, paceText(pace, ahead)]
+        .filter(Boolean)
+        .join(' '),
     })
   }
 
@@ -892,6 +1226,18 @@ function metersOf(usage: UsageSnapshot, account: PlanUsage | null, isHeld = fals
   }
 
   return meters
+}
+
+/** A monthly figure past its budget says so, in place of the time left or the pace. */
+function overBudget(percent: number): Pick<Meter, 'hint' | 'isUrgent' | 'pace'> {
+  return percent >= 100 ? { hint: 'over budget', isUrgent: true, pace: 'Over budget' } : {}
+}
+
+/** `Oct 12`, as the person's calendar reads it. */
+function dayOf(at: number) {
+  const date = new Date(at)
+
+  return `${MONTHS[date.getMonth()]} ${date.getDate()}`
 }
 
 /** A held window that has reset since it was read: named, with no figure and an empty bar. */
@@ -983,10 +1329,14 @@ function heldFor(meters: Meter[], usage: UsageSnapshot, account: PlanUsage | nul
   return age < MINUTE ? 'Held' : `Held · ${countdown(age - (age % MINUTE))}`
 }
 
-/** Fits the one-line row to the band: bars shrink, then the hints drop, then the bars. */
-function compactLayout(meters: Meter[], columns: number, toggleLabel: string, held: string | undefined) {
+/**
+ * Fits the one-line row to the band: bars shrink, then the hints drop, then the bars. `notes` are
+ * the plain lines drawn after the meters (`Held · 14m`, a missing budget), each taking its room.
+ */
+function compactLayout(meters: Meter[], columns: number, toggleLabel: string, notes: (string | undefined)[]) {
   const toggle = toggleLabel.length + 2
-  const chrome = 2 + toggle + 3 * (meters.length - 1) + (held === undefined ? 0 : held.length + 3)
+  const chrome =
+    2 + toggle + 3 * (meters.length - 1) + notes.reduce((sum, note) => sum + (note === undefined ? 0 : note.length + 3), 0)
   const barred = meters.filter(hasBar).length
 
   for (const hasHints of [true, false]) {
@@ -1154,7 +1504,7 @@ function hasBar(meter: Meter): meter is Meter & { percent: number } {
 }
 
 function windowOf(kind: string) {
-  return WINDOWS[kind] ?? { title: titleCase(kind), short: titleCase(kind), rank: 99, color: HUE.pink }
+  return WINDOWS[kind] ?? { title: titleCase(kind), short: titleCase(kind), rank: 99, color: HUE.green }
 }
 
 function titleCase(kind: string) {

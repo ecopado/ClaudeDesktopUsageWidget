@@ -7,11 +7,12 @@ and what this chat has cost:
 - **5-hour / Weekly**: on a personal plan, the 5-hour and weekly (all models) windows, each with
   the time it has left (`5-hour 42% 2h left`). A model's own weekly window (such as
   `Weekly · Fable`) is left out.
-- **Monthly**: on a work seat, the month's spend against its cap (`Monthly $46.50 of $150`).
+- **Monthly**: on a work seat, the month's spend against its budget (`Monthly $46.50 of $150`).
   A work seat reports no 5-hour or weekly window at all, so this is the only usage limit it has.
+  On an account with no monthly budget of its own, you can set one (see Options).
 - **This chat**: what this chat has cost so far, estimated at API rates (`$1.24 this chat`).
 
-Each bar keeps one colour (blue for context, purple for 5-hour and monthly, teal for weekly) and
+Each bar keeps one colour (blue for context, purple for 5-hour, teal for weekly, pink for monthly) and
 turns amber from 75% and red from 90%. The numbers beside the bars use your theme's own text and
 warning colours, so they follow light and dark mode.
 
@@ -36,6 +37,27 @@ the widget's command is `/usage-pane`.)
 
 The widget works out which account is signed in from the app's usage card and shows that
 account's limits, switching by itself when you change account.
+
+## Options
+
+Choose what the strip shows in the Usage pane's **Customize** section, or in `/config` in a
+terminal session. Both save to your settings, and the widget picks the change up at once.
+
+- **Strip shows**: `All` (the default), `5-hour and weekly`, `5-hour and monthly`,
+  `Weekly and monthly` or `Monthly only`. A limit you've hidden comes back into the strip while it
+  needs attention: from 75%, or when you're on pace to reach it before it resets. A choice your
+  account doesn't report gives way to what it does, so a work seat shows its monthly budget
+  whatever you pick.
+- **Context** and **This chat's cost**: shown or hidden.
+- **Monthly budget**: a dollar amount to measure this month's spending against, for an account
+  that reports no monthly budget of its own. Where your account reports one (a work seat, or
+  extra usage turned on), that one is always used and this field gives way to a note saying so.
+
+A budget you set is measured against what your Claude Code chats cost this month (UTC),
+estimated at API rates: the same figure as each chat's cost, added up across every chat the
+widget runs in, and counted from when you installed 0.5.0. It's not what you're billed, and chats
+on claude.ai on the web or phone aren't counted. On a Pro or Max plan the 5-hour and weekly
+limits are still what actually stops you; the budget is a way to see what your use would cost.
 
 ## Install
 
@@ -81,6 +103,16 @@ the watch is on: every commit or pull counts as a change.
 
 Remove the `CLAUDE_CODE_PLUGIN_DIRS` line from `~/.claude/settings.json` (or just this mod's
 path, if you load several), delete the `usage-widget` folder, and restart the app.
+
+## What's new in 0.5.0
+
+- Choose what the strip shows: which plan limits, and whether it shows the context and this
+  chat's cost. Set it in the Usage pane's new **Customize** section, or in `/config`.
+- A monthly budget of your own, measured against what your Claude Code chats cost this month,
+  with the same pace tick and warnings as the other limits. Where your account reports a monthly
+  budget of its own, as a work seat does, that one is used instead.
+- A limit you've hidden comes back into the strip while it needs attention.
+- Monthly is now pink, so it never reads as the 5-hour window's purple beside it.
 
 ## What's new in 0.4.2
 

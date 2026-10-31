@@ -48,6 +48,18 @@ export type HistoryPoint = {
   costUsd?: number
 }
 
+/**
+ * What this calendar month (UTC) has cost across the Claude Code chats the widget ran in,
+ * estimated at API rates: the figure a monthly budget is measured against.
+ */
+export type MonthSpend = {
+  /** `2026-10`: the UTC month `usd` counts. */
+  month: string
+  usd: number
+  /** When the widget first counted spend; a month that began before it counts from there. */
+  since?: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'usage-widget': {
@@ -56,6 +68,9 @@ declare module 'claude-code' {
       /** The context window's readings this session, oldest first, at most 60. */
       history: HistoryPoint[]
       isPaneOpen: boolean
+      monthSpend: MonthSpend | null
+      /** Why the pane's last change to a setting did not go through, until the next one does. */
+      settingError: string | null
     }
   }
 }

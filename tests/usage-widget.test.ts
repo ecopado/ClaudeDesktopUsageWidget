@@ -12,7 +12,7 @@ const DAY = 24 * HOUR
 const CONTEXT = { tokens: 84_000, window: 200_000, percent: 42 }
 
 // The bars' hues, as the widget draws them on both surfaces.
-const HUE = { context: '#378ADD', purple: '#7F77DD', teal: '#1D9E75', pink: '#D4537E', warning: '#EF9F27', danger: '#E24B4A', neutral: '#888780' }
+const HUE = { context: '#378ADD', purple: '#7F77DD', teal: '#1D9E75', pink: '#D4537E', green: '#639922', warning: '#EF9F27', danger: '#E24B4A', neutral: '#888780' }
 
 /** The app's usage card as a work seat reports it: no rate-limit window, a monthly cap. */
 const WORK_CARD = {
@@ -939,6 +939,256 @@ describe('usage widget', () => {
     await cleared.unmount()
   })
 
+  test('the strip shows only the plan limits chosen, and context and cost as set', { options: { strip: 'Weekly and monthly', showContext: false, showCost: false } }, async ($, on) => {
+    setup(on)
+    await $.session.measure({
+      context: CONTEXT,
+      rateLimits: [
+        { kind: 'five_hour', percentUsed: 23, resetsAt: fromNow(2 * HOUR) },
+        { kind: 'seven_day', percentUsed: 8, resetsAt: fromNow(3 * DAY) },
+      ],
+      cost: { usd: 1.5 },
+      changed: ['context', 'rateLimits', 'cost'],
+    })
+
+    for (const surface of SURFACES) {
+      const ui = await $.ui.mount({ ...band(), surface })
+      const shown = await words(ui)
+
+      expect(shown).toContain('Weekly')
+      expect(shown).not.toContain('5-hour')
+      expect(shown).not.toContain('Context')
+      expect(shown).not.toContain('this chat')
+      // Monthly was chosen and the account reports none, with no budget set: it asks for one.
+      expect(shown).toContain('Monthly: set a budget in Details')
+      await ui.unmount()
+    }
+  })
+
+  // What other chats cost this month, as their own keys hold it; this session adds its $1.50.
+  const SPENT_ELSEWHERE = { 'spend:2026-10:111': 84.9 }
+
+  test('a monthly budget is measured against what the chats cost this month', { options: { strip: 'Weekly and monthly', monthlyBudget: 200 } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+    mock.store(on, SPENT_ELSEWHERE)
+    on('session.measure', ($, e) => ({ changed: e.changed }))
+    withPanes(on)
+    withCard(on, PERSONAL_CARD)
+    await begin($)
+
+    for (const surface of SURFACES) {
+      const ui = await $.ui.mount({ ...band(), surface })
+      const shown = await words(ui)
+
+      expect(shown).toContain('Monthly')
+      expect(shown).toContain('$86.40')
+      expect(shown).toContain('of $200')
+      // Weekly and monthly were chosen: the calm 5-hour window stays out of the strip.
+      expect(shown).toContain('Weekly')
+      expect(shown).not.toContain('5-hour')
+      await ui.unmount()
+
+      const details = await $.ui.mount({ ...pane(), surface })
+      const spelled = await words(details)
+
+      expect(spelled).toContain('Monthly budget')
+      // Counting began as this session started, on the 6th.
+      expect(spelled).toMatch(/Estimated at API rates across your Claude Code chats since \w{3} \d{1,2}\. Not what you're billed\./)
+      expect(spelled).toMatch(/Resets \w{3} \d{1,2}, \d{1,2}:\d{2} [AP]M · in 25d 12h/)
+      // The pane shows every limit, whatever the strip shows.
+      expect(spelled).toContain('5-hour limit')
+      await details.unmount()
+    }
+  })
+
+  test('a hidden limit comes back into the strip while it needs attention', { options: { strip: 'Weekly and monthly' } }, async ($, on) => {
+    setup(on)
+    await $.session.measure({
+      context: CONTEXT,
+      rateLimits: [
+        { kind: 'five_hour', percentUsed: 80, resetsAt: fromNow(2 * HOUR) },
+        { kind: 'seven_day', percentUsed: 20, resetsAt: fromNow(5 * DAY) },
+      ],
+      changed: ['context', 'rateLimits'],
+    })
+
+    for (const surface of SURFACES) {
+      const ui = await $.ui.mount({ ...band(), surface })
+      const shown = await words(ui)
+
+      expect(shown).toContain('5-hour')
+      expect(shown).toContain('limit in ~45m')
+      expect(shown).toContain('Weekly')
+      await ui.unmount()
+    }
+  })
+
+  test('the account’s own monthly budget comes before one set in the options', { options: { monthlyBudget: 500 } }, async ($, on) => {
+    setup(on)
+    withCard(on, WORK_CARD)
+    await begin($)
+
+    for (const surface of SURFACES) {
+      const ui = await $.ui.mount({ ...band(), surface })
+      const shown = await words(ui)
+
+      expect(shown).toContain('$46.50')
+      expect(shown).toContain('of $150')
+      expect(shown).not.toContain('$500')
+      await ui.unmount()
+
+      const details = await $.ui.mount({ ...pane(), surface })
+      expect(await words(details)).toContain("Monthly budget: using your account's own budget of $150.")
+      expect(await details.findAll({ type: 'Input' })).toEqual([])
+      await details.unmount()
+    }
+  })
+
+  // A work seat reports no 5-hour or weekly window: its monthly budget takes their place.
+  test('a chosen meter the account does not report gives way to the ones it does', { options: { strip: '5-hour and weekly' } }, async ($, on) => {
+    setup(on)
+    withCard(on, WORK_CARD)
+    await begin($)
+
+    const ui = await $.ui.mount({ ...band(), surface: 'desktop' })
+    expect(await words(ui)).toContain('$46.50')
+    await ui.unmount()
+  })
+
+  test('monthly only with no budget asks for one and keeps the limits the account has', { options: { strip: 'Monthly only' } }, async ($, on) => {
+    setup(on)
+    withCard(on, PERSONAL_CARD)
+    await begin($)
+
+    for (const surface of SURFACES) {
+      const ui = await $.ui.mount({ ...band(), surface })
+      const shown = await words(ui)
+
+      expect(shown).toContain('Monthly: set a budget in Details')
+      expect(shown).toContain('5-hour')
+      expect(shown).toContain('Weekly')
+      await ui.unmount()
+    }
+  })
+
+  // A conversation's cost runs on from its first launch, across a resume and across months.
+  test('monthly spend counts each conversation once, across chats, resumes and months', { options: { monthlyBudget: 100 } }, async ($, on) => {
+    const clock = mock.clock(on, { now: NOW })
+    const startedAt = Date.parse('2026-09-28T00:00:00Z')
+    const saved = new Map<string, unknown>(
+      Object.entries({
+        // This conversation's September, before the month turned.
+        [`spend:2026-09:${startedAt}`]: 15,
+        // Another chat this month.
+        'spend:2026-10:222': 10,
+        // A month long gone.
+        'spend:2026-07:333': 99,
+      }),
+    )
+    on('store.get', (_, e) => ({ value: saved.get(e.key) }))
+    on('store.set', (_, e) => {
+      saved.set(e.key, e.value)
+
+      return { value: undefined }
+    })
+    on('store.delete', (_, e) => {
+      saved.delete(e.key)
+
+      return { value: undefined }
+    })
+    on('store.keys', () => ({ value: [...saved.keys()] }))
+    on('session.measure', ($, e) => ({ changed: e.changed }))
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    on('session.usage', () => ({ value: { startedAt, context: CONTEXT, rateLimits: [], cost: { usd: 20 } } }))
+    withPanes(on)
+    await $.session.start(START)
+
+    // $20 in all, $15 of it September's: October's share is $5, beside the other chat's $10.
+    expect(saved.get(`spend:2026-10:${startedAt}`)).toBe(5)
+    expect(saved.has('spend:2026-07:333')).toBe(false)
+
+    // Read again a minute on (a resume reads the same total): nothing is counted twice.
+    await clock.advance(MINUTE)
+    expect(saved.get(`spend:2026-10:${startedAt}`)).toBe(5)
+
+    const details = await $.ui.mount({ ...pane(), surface: 'desktop' })
+    expect(await words(details)).toContain('$15')
+    await details.unmount()
+  })
+
+  test('a budget warns when its pace passes it, and when it is spent', { options: { monthlyBudget: 100 } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+    mock.store(on, { 'spend:2026-10:111': 118.5 })
+    on('session.measure', ($, e) => ({ changed: e.changed }))
+    withPanes(on)
+    withCard(on, PERSONAL_CARD)
+    await begin($)
+
+    // $120 spent of $100: past it. A wide band, so the terminal has room for every hint.
+    const ui = await $.ui.mount({ ...band(240), surface: 'terminal' })
+    expect((await ui.find({ type: 'Text', text: 'over budget' }))?.props.color).toBe('warning')
+    expect((await ui.find({ type: 'Text', text: '$120' }))?.props.color).toBe('error')
+    await ui.unmount()
+
+    const details = await $.ui.mount({ ...pane(), surface: 'terminal' })
+    expect(await words(details)).toContain('Over budget')
+    await details.unmount()
+  })
+
+  test('a budget on pace to run out before the month ends says when', { options: { strip: 'Monthly only', monthlyBudget: 300 } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+    mock.store(on, SPENT_ELSEWHERE)
+    on('session.measure', ($, e) => ({ changed: e.changed }))
+    withPanes(on)
+    withCard(on, PERSONAL_CARD)
+    await begin($)
+
+    // $86.40 five and a half days into October runs past $300 well before the 1st.
+    const ui = await $.ui.mount({ ...band(), surface: 'desktop' })
+    const hint = (await ui.findAll({ type: 'Text' })).find(found => /^limit in ~\d+d/.test(found.text))
+    expect(hint?.props.color).toBe('warning')
+    await ui.unmount()
+  })
+
+  test('Customize writes each choice through the config rows, and says what was refused', async ($, on) => {
+    setup(on)
+    const written: [string, unknown][] = []
+    on('config.set', (_, e) => {
+      if (e.key === 'usage-widget.showCost') {
+        return { deny: 'Your organization manages this setting.' }
+      }
+
+      written.push([e.key, e.value])
+
+      return { value: e.value }
+    })
+    withCard(on, PERSONAL_CARD)
+    await begin($)
+
+    const details = await $.ui.mount({ ...pane(), surface: 'desktop' })
+
+    await details.select({ key: 'strip', value: 'Monthly only' })
+    await details.select({ key: 'show-context', value: 'hidden' })
+    await details.input({ key: 'budget', text: '$1,250' })
+    await details.input({ key: 'budget', text: '' })
+    expect(written).toEqual([
+      ['usage-widget.strip', 'Monthly only'],
+      ['usage-widget.showContext', false],
+      ['usage-widget.monthlyBudget', 1250],
+      ['usage-widget.monthlyBudget', 0],
+    ])
+
+    // A typed amount that is no amount is caught before it is written.
+    await details.input({ key: 'budget', text: 'lots' })
+    expect(written.length).toBe(4)
+    expect(await words(details)).toContain('Enter an amount above $0, or leave it empty for none.')
+
+    // One the engine refuses says why.
+    await details.select({ key: 'show-cost', value: 'hidden' })
+    expect(await words(details)).toContain('Your organization manages this setting.')
+    await details.unmount()
+  })
+
   test('Details opens the Usage pane and Hide details closes it', async ($, on) => {
     const open = setup(on)
     withCard(on, PERSONAL_CARD)
@@ -1044,7 +1294,8 @@ describe('usage widget', () => {
     })
 
     const ui = await $.ui.mount({ ...band(200), surface: 'terminal' })
-    expect(await fills(ui)).toEqual([HUE.context, HUE.teal, HUE.purple, HUE.pink, HUE.pink])
+    // Monthly in pink, so it never reads as the 5-hour window's purple beside it.
+    expect(await fills(ui)).toEqual([HUE.context, HUE.teal, HUE.pink, HUE.green, HUE.green])
     expect(await words(ui)).toContain('Daily tokens')
     await ui.unmount()
   })

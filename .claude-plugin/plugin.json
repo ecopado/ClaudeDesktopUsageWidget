@@ -1,6 +1,40 @@
 {
   "name": "usage-widget",
-  "version": "0.4.2",
-  "description": "A calm usage strip above the prompt — context, your plan's 5-hour and weekly limits (or a work seat's monthly spend) with pace, and what this chat cost — plus a Usage pane with resets, projections and the context trend.",
-  "types": "./types/index.d.ts"
+  "version": "0.5.0",
+  "description": "A calm usage strip above the prompt: context, your plan's 5-hour and weekly limits or a monthly budget with pace, and what this chat cost. You choose what it shows, and a Usage pane adds resets, projections and the context trend.",
+  "types": "./types/index.d.ts",
+  "userConfig": {
+    "strip": {
+      "type": "string",
+      "title": "Strip shows",
+      "description": "Which plan limits the strip shows. A hidden limit comes back while it needs attention.",
+      "options": [
+        "All",
+        "5-hour and weekly",
+        "5-hour and monthly",
+        "Weekly and monthly",
+        "Monthly only"
+      ],
+      "default": "All"
+    },
+    "showContext": {
+      "type": "boolean",
+      "title": "Show context",
+      "description": "Show the context window in the strip.",
+      "default": true
+    },
+    "showCost": {
+      "type": "boolean",
+      "title": "Show this chat's cost",
+      "description": "Show what this chat has cost in the strip.",
+      "default": true
+    },
+    "monthlyBudget": {
+      "type": "number",
+      "title": "Monthly budget (USD)",
+      "description": "Used only when your account reports no monthly budget of its own. 0 for none.",
+      "default": 0,
+      "min": 0
+    }
+  }
 }
