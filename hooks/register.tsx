@@ -33,11 +33,18 @@ const STORE_PANE = 'isPaneOpen'
 // The card last read, kept across sessions: a session the app starts afresh (coming back to a
 // chat, a new one) shows the plan's limits from its first draw, held, until it reads its own.
 const STORE_PLAN = 'plan'
-// What each conversation has cost in each UTC month, under `spend:<month>:<startedAt>`: one key a
-// conversation, which only it writes, so chats running side by side never overwrite each other.
-// `startedAt` holds across a resume, whose cost carries on from the run before, and starts over on
-// /clear, whose cost does too; a session id would count a resumed chat twice.
+// What each conversation has cost in each UTC month, under `spend:<month>:<startedAt>` as a
+// SpendRecord: one key a conversation, which only it writes, so chats running side by side never
+// overwrite each other. `startedAt` holds across a resume, whose cost carries on from the run
+// before, and starts over on /clear, whose cost does too; a session id would count a resumed chat
+// twice.
 const SPEND = 'spend:'
+
+/**
+ * One conversation's month: its running cost (from its first launch) where the month's count
+ * began, and where it was last read. The month's share is the difference.
+ */
+type SpendRecord = { from: number; to: number }
 // When the widget first counted spend: a month that began before it is counted from there.
 const STORE_SPEND_SINCE = 'spendSince'
 // The Customize section's choices (PaneChoices), shared by every chat.
@@ -679,8 +686,8 @@ async function refresh($: EngineInterface) {
  * Records what this conversation has cost this month, then totals the month across every
  * conversation the widget ran in: the figure a monthly budget is measured against.
  *
- * A conversation's cost runs on from its first launch, months included, so what it cost in an
- * earlier month is taken off before the rest is set down for this one. Months before last are
+ * A conversation's cost runs on from its first launch, months included, so each month counts
+ * only what it added from where the month's count began (openingCost). Months before last are
  * dropped. A conversation the widget never ran in, a claude.ai chat among them, is not counted.
  */
 async function tallySpend($: EngineInterface, usage: SessionUsage) {
@@ -690,17 +697,11 @@ async function tallySpend($: EngineInterface, usage: SessionUsage) {
 
   if (cost !== undefined && cost > 0) {
     const own = `${SPEND}${month}:${usage.startedAt}`
-    const earlier = (await $.store.keys()).filter(key => key.startsWith(SPEND) && key.endsWith(`:${usage.startedAt}`) && key !== own)
-    let before = 0
+    const kept = spendRecordOf(await $.store.get(own))
+    const from = Math.min(kept?.from ?? (await openingCost($, usage.startedAt, month, cost)), cost)
 
-    for (const key of earlier) {
-      before += amountOf(await $.store.get(key))
-    }
-
-    const here = Math.max(cost - before, 0)
-
-    if (amountOf(await $.store.get(own)) !== here) {
-      await $.store.set(own, here)
+    if (kept?.from !== from || kept.to !== cost) {
+      await $.store.set(own, { from, to: cost })
     }
 
     if (typeof (await $.store.get(STORE_SPEND_SINCE)) !== 'number') {
@@ -721,7 +722,8 @@ async function tallySpend($: EngineInterface, usage: SessionUsage) {
     if (keyMonth < oldest) {
       await $.store.delete(key)
     } else if (keyMonth === month) {
-      usd += amountOf(await $.store.get(key))
+      const record = spendRecordOf(await $.store.get(key))
+      usd += record === undefined ? 0 : Math.max(record.to - record.from, 0)
     }
   }
 
@@ -734,8 +736,35 @@ async function tallySpend($: EngineInterface, usage: SessionUsage) {
   )
 }
 
-function amountOf(value: unknown) {
-  return typeof value === 'number' && Number.isFinite(value) ? value : 0
+/**
+ * Where a conversation's count for `month` begins, the first time it is read in the month. One
+ * begun in the month starts from nothing: all it has cost is the month's. One begun before starts
+ * from where it was last read in an earlier month; read in none, from what it costs now, since
+ * how much of that fell in this month can't be told.
+ */
+async function openingCost($: EngineInterface, startedAt: number, month: string, cost: number) {
+  if (monthKey(startedAt) >= month) {
+    return 0
+  }
+
+  const earlier = (await $.store.keys())
+    .filter(key => key.startsWith(SPEND) && key.endsWith(`:${startedAt}`) && key.slice(SPEND.length, SPEND.length + 7) < month)
+    .sort()
+  const last = earlier[earlier.length - 1]
+  const record = last === undefined ? undefined : spendRecordOf(await $.store.get(last))
+
+  return record?.to ?? cost
+}
+
+/** A SpendRecord as the store holds it; anything else (an earlier build's bare amount) is none. */
+function spendRecordOf(value: unknown): SpendRecord | undefined {
+  if (typeof value !== 'object' || value === null || !('from' in value) || !('to' in value)) {
+    return undefined
+  }
+
+  const { from, to } = value
+
+  return typeof from === 'number' && Number.isFinite(from) && typeof to === 'number' && Number.isFinite(to) ? { from, to } : undefined
 }
 
 /** `2026-10`: the UTC month a figure belongs to, as a monthly cap resets on the first at midnight UTC. */

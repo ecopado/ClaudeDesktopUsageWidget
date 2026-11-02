@@ -60,8 +60,10 @@ there later takes over from the pane's choice for that option.
 
 A budget you set is measured against what your Claude Code chats cost this month (UTC),
 estimated at API rates: the same figure as each chat's cost, added up across every chat the
-widget runs in, and counted from when you installed 0.5.0. It's not what you're billed, and chats
-on claude.ai on the web or phone aren't counted. On a Pro or Max plan the 5-hour and weekly
+widget runs in, and counted from when you installed 0.5.0. A chat that began in an earlier month
+counts only what it adds this month: from where it stood when the month began if the widget saw
+it last month, otherwise from the first time the widget sees it this month. It's not what you're
+billed, and chats on claude.ai on the web or phone aren't counted. On a Pro or Max plan the 5-hour and weekly
 limits are still what actually stops you; the budget is a way to see what your use would cost.
 
 ## Install

@@ -985,7 +985,7 @@ describe('usage widget', () => {
   })
 
   // What other chats cost this month, as their own keys hold it; this session adds its $1.50.
-  const SPENT_ELSEWHERE = { 'spend:2026-10:111': 84.9 }
+  const SPENT_ELSEWHERE = { 'spend:2026-10:111': { from: 0, to: 84.9 } }
 
   test('a monthly budget is measured against what the chats cost this month', { options: { strip: 'Weekly and monthly', monthlyBudget: 200 } }, async ($, on) => {
     mock.clock(on, { now: NOW })
@@ -1096,11 +1096,11 @@ describe('usage widget', () => {
     const startedAt = Date.parse('2026-09-28T00:00:00Z')
     const saved = memoryStore(on, {
       // This conversation's September, before the month turned.
-      [`spend:2026-09:${startedAt}`]: 15,
-      // Another chat this month.
-      'spend:2026-10:222': 10,
+      [`spend:2026-09:${startedAt}`]: { from: 0, to: 15 },
+      // Another chat this month, begun before it: $10 of its cost is October's.
+      'spend:2026-10:222': { from: 2, to: 12 },
       // A month long gone.
-      'spend:2026-07:333': 99,
+      'spend:2026-07:333': { from: 0, to: 99 },
     })
     on('session.measure', ($, e) => ({ changed: e.changed }))
     on('session.start', ($, e) => ({ cwd: e.cwd }))
@@ -1109,21 +1109,50 @@ describe('usage widget', () => {
     await $.session.start(START)
 
     // $20 in all, $15 of it September's: October's share is $5, beside the other chat's $10.
-    expect(saved.get(`spend:2026-10:${startedAt}`)).toBe(5)
+    expect(saved.get(`spend:2026-10:${startedAt}`)).toEqual({ from: 15, to: 20 })
     expect(saved.has('spend:2026-07:333')).toBe(false)
 
     // Read again a minute on (a resume reads the same total): nothing is counted twice.
     await clock.advance(MINUTE)
-    expect(saved.get(`spend:2026-10:${startedAt}`)).toBe(5)
+    expect(saved.get(`spend:2026-10:${startedAt}`)).toEqual({ from: 15, to: 20 })
 
     const details = await $.ui.mount({ ...pane(), surface: 'desktop' })
     expect(await words(details)).toContain('$15')
     await details.unmount()
   })
 
+  // A chat resumed this month that began before it: its cost so far is mostly earlier months'.
+  test('a chat begun before this month counts only what it adds once the widget sees it', { options: { monthlyBudget: 200 } }, async ($, on) => {
+    const clock = mock.clock(on, { now: NOW })
+    const startedAt = Date.parse('2026-09-14T08:00:00Z')
+    let cost = 2480.15
+    const saved = memoryStore(on, {
+      // What an earlier build kept: the chat's whole cost, all of it counted as October's.
+      [`spend:2026-10:${startedAt}`]: 2480.15,
+    })
+    on('session.measure', ($, e) => ({ changed: e.changed }))
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    on('session.usage', () => ({ value: { startedAt, context: CONTEXT, rateLimits: [], cost: { usd: cost } } }))
+    withPanes(on)
+    await $.session.start(START)
+
+    // Never read in September: October counts from here, not from its first launch.
+    expect(saved.get(`spend:2026-10:${startedAt}`)).toEqual({ from: 2480.15, to: 2480.15 })
+
+    cost = 2492.22
+    await clock.advance(MINUTE)
+    expect(saved.get(`spend:2026-10:${startedAt}`)).toEqual({ from: 2480.15, to: 2492.22 })
+
+    const details = await $.ui.mount({ ...pane(), surface: 'desktop' })
+    const spelled = await words(details)
+    expect(spelled).toContain('$12.07')
+    expect(spelled).not.toContain('over budget')
+    await details.unmount()
+  })
+
   test('a budget warns when its pace passes it, and when it is spent', { options: { monthlyBudget: 100 } }, async ($, on) => {
     mock.clock(on, { now: NOW })
-    mock.store(on, { 'spend:2026-10:111': 118.5 })
+    mock.store(on, { 'spend:2026-10:111': { from: 0, to: 118.5 } })
     on('session.measure', ($, e) => ({ changed: e.changed }))
     withPanes(on)
     withCard(on, PERSONAL_CARD)
