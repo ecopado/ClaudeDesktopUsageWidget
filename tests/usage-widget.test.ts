@@ -103,6 +103,25 @@ const setup = (on: On) => {
   return withPanes(on)
 }
 
+/** A store in memory whose contents a test reads back, keys and deletes included. */
+const memoryStore = (on: On, seed: Record<string, unknown> = {}) => {
+  const saved = new Map<string, unknown>(Object.entries(seed))
+  on('store.get', (_, e) => ({ value: saved.get(e.key) }))
+  on('store.set', (_, e) => {
+    saved.set(e.key, e.value)
+
+    return { value: undefined }
+  })
+  on('store.delete', (_, e) => {
+    saved.delete(e.key)
+
+    return { value: undefined }
+  })
+  on('store.keys', () => ({ value: [...saved.keys()] }))
+
+  return saved
+}
+
 /** What `$.session.start` takes: the widget reads the card from its own session.start hook. */
 const START = { cwd: '/', surface: 'desktop' as const, isInteractive: true }
 
@@ -1075,28 +1094,14 @@ describe('usage widget', () => {
   test('monthly spend counts each conversation once, across chats, resumes and months', { options: { monthlyBudget: 100 } }, async ($, on) => {
     const clock = mock.clock(on, { now: NOW })
     const startedAt = Date.parse('2026-09-28T00:00:00Z')
-    const saved = new Map<string, unknown>(
-      Object.entries({
-        // This conversation's September, before the month turned.
-        [`spend:2026-09:${startedAt}`]: 15,
-        // Another chat this month.
-        'spend:2026-10:222': 10,
-        // A month long gone.
-        'spend:2026-07:333': 99,
-      }),
-    )
-    on('store.get', (_, e) => ({ value: saved.get(e.key) }))
-    on('store.set', (_, e) => {
-      saved.set(e.key, e.value)
-
-      return { value: undefined }
+    const saved = memoryStore(on, {
+      // This conversation's September, before the month turned.
+      [`spend:2026-09:${startedAt}`]: 15,
+      // Another chat this month.
+      'spend:2026-10:222': 10,
+      // A month long gone.
+      'spend:2026-07:333': 99,
     })
-    on('store.delete', (_, e) => {
-      saved.delete(e.key)
-
-      return { value: undefined }
-    })
-    on('store.keys', () => ({ value: [...saved.keys()] }))
     on('session.measure', ($, e) => ({ changed: e.changed }))
     on('session.start', ($, e) => ({ cwd: e.cwd }))
     on('session.usage', () => ({ value: { startedAt, context: CONTEXT, rateLimits: [], cost: { usd: 20 } } }))
@@ -1150,42 +1155,96 @@ describe('usage widget', () => {
     await ui.unmount()
   })
 
-  test('Customize writes each choice through the config rows, and says what was refused', async ($, on) => {
-    setup(on)
-    const written: [string, unknown][] = []
-    on('config.set', (_, e) => {
-      if (e.key === 'usage-widget.showCost') {
-        return { deny: 'Your organization manages this setting.' }
+  test('Customize keeps each choice for every chat and redraws the strip at once', async ($, on) => {
+    mock.clock(on, { now: NOW })
+    const saved = memoryStore(on)
+    on('session.measure', ($, e) => ({ changed: e.changed }))
+    withPanes(on)
+    withCard(on, PERSONAL_CARD)
+    await begin($)
+
+    for (const surface of SURFACES) {
+      saved.delete('choices')
+      await $.session.start(START)
+
+      const details = await $.ui.mount({ ...pane(), surface })
+      const strip = await $.ui.mount({ ...band(), surface })
+      expect(await words(strip)).toContain('5-hour')
+
+      await details.select({ key: 'strip', value: 'Monthly only' })
+      await details.select({ key: 'show-context', value: 'hidden' })
+      await details.input({ key: 'budget', text: '$1,250' })
+      expect(saved.get('choices')).toEqual({
+        strip: { value: 'Monthly only', over: 'All' },
+        showContext: { value: false, over: true },
+        monthlyBudget: { value: 1250, over: 0 },
+      })
+
+      // No reload: the strip already shows what was chosen.
+      const shown = await words(strip)
+      expect(shown).toContain('of $1250')
+      expect(shown).not.toContain('5-hour')
+      expect(shown).not.toContain('Context')
+
+      // A typed amount that is no amount is caught before it is kept.
+      await details.input({ key: 'budget', text: 'lots' })
+      expect(await words(details)).toContain('Enter an amount above $0, or leave it empty for none.')
+      expect(saved.get('choices')).toMatchObject({ monthlyBudget: { value: 1250 } })
+
+      // An empty field is no budget, and the next change that goes in clears the error.
+      await details.input({ key: 'budget', text: '' })
+      expect(saved.get('choices')).toMatchObject({ monthlyBudget: { value: 0 } })
+      expect(await words(details)).not.toContain('Enter an amount')
+      expect(await words(strip)).toContain('Monthly: set a budget in Details')
+      await strip.unmount()
+      await details.unmount()
+    }
+  })
+
+  test('a choice from the pane comes back in the next chat, until /config changes that option', { options: { strip: '5-hour and weekly' } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+    const saved = memoryStore(on, {
+      choices: {
+        // Made over `All`; the option has since been set to `5-hour and weekly`, which wins.
+        strip: { value: 'Monthly only', over: 'All' },
+        showCost: { value: false, over: true },
+      },
+    })
+    on('session.measure', ($, e) => ({ changed: e.changed }))
+    withPanes(on)
+    withCard(on, PERSONAL_CARD)
+    await begin($)
+
+    const ui = await $.ui.mount({ ...band(), surface: 'desktop' })
+    const shown = await words(ui)
+    expect(shown).toContain('5-hour')
+    expect(shown).not.toContain('Monthly')
+    expect(shown).not.toContain('this chat')
+    await ui.unmount()
+
+    // The overtaken choice is dropped, so the option going back to `All` won't bring it back.
+    expect(saved.get('choices')).toEqual({ showCost: { value: false, over: true } })
+  })
+
+  test('a choice that cannot be kept says so', async ($, on) => {
+    mock.clock(on, { now: NOW })
+    on('store.get', () => ({ value: undefined }))
+    on('store.keys', () => ({ value: [] }))
+    on('store.set', (_, e) => {
+      if (e.key === 'choices') {
+        throw new Error('disk full')
       }
 
-      written.push([e.key, e.value])
-
-      return { value: e.value }
+      return { value: undefined }
     })
+    on('session.measure', ($, e) => ({ changed: e.changed }))
+    withPanes(on)
     withCard(on, PERSONAL_CARD)
     await begin($)
 
     const details = await $.ui.mount({ ...pane(), surface: 'desktop' })
-
-    await details.select({ key: 'strip', value: 'Monthly only' })
-    await details.select({ key: 'show-context', value: 'hidden' })
-    await details.input({ key: 'budget', text: '$1,250' })
-    await details.input({ key: 'budget', text: '' })
-    expect(written).toEqual([
-      ['usage-widget.strip', 'Monthly only'],
-      ['usage-widget.showContext', false],
-      ['usage-widget.monthlyBudget', 1250],
-      ['usage-widget.monthlyBudget', 0],
-    ])
-
-    // A typed amount that is no amount is caught before it is written.
-    await details.input({ key: 'budget', text: 'lots' })
-    expect(written.length).toBe(4)
-    expect(await words(details)).toContain('Enter an amount above $0, or leave it empty for none.')
-
-    // One the engine refuses says why.
     await details.select({ key: 'show-cost', value: 'hidden' })
-    expect(await words(details)).toContain('Your organization manages this setting.')
+    expect(await words(details)).toContain("Couldn't save that setting.")
     await details.unmount()
   })
 

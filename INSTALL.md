@@ -40,8 +40,13 @@ account's limits, switching by itself when you change account.
 
 ## Options
 
-Choose what the strip shows in the Usage pane's **Customize** section, or in `/config` in a
-terminal session. Both save to your settings, and the widget picks the change up at once.
+Choose what the strip shows in the Usage pane's **Customize** section. The widget keeps your
+choices for every chat, and the strip changes as soon as you pick. Chats already open pick a
+change up within a minute.
+
+The same options can also be set as plugin options: in `/config` where Claude Code lists them,
+or under `pluginConfigs` → `usage-widget` → `options` in `~/.claude/settings.json`. Changing one
+there later takes over from the pane's choice for that option.
 
 - **Strip shows**: `All` (the default), `5-hour and weekly`, `5-hour and monthly`,
   `Weekly and monthly` or `Monthly only`. A limit you've hidden comes back into the strip while it
@@ -107,7 +112,7 @@ path, if you load several), delete the `usage-widget` folder, and restart the ap
 ## What's new in 0.5.0
 
 - Choose what the strip shows: which plan limits, and whether it shows the context and this
-  chat's cost. Set it in the Usage pane's new **Customize** section, or in `/config`.
+  chat's cost. Set it in the Usage pane's new **Customize** section.
 - A monthly budget of your own, measured against what your Claude Code chats cost this month,
   with the same pace tick and warnings as the other limits. Where your account reports a monthly
   budget of its own, as a work seat does, that one is used instead.

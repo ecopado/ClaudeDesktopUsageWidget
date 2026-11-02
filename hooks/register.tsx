@@ -1,7 +1,6 @@
 import { atom, read, update } from 'claude-code'
 import type {
   BoxProps,
-  ConfigValue,
   ElementConstructor,
   EngineInterface,
   McpToolResult,
@@ -11,13 +10,23 @@ import type {
   TextProps,
 } from 'claude-code'
 
-import type { HistoryPoint, MonthSpend, PlanUsage, SpendLimit, UsageLimit, UsageSnapshot } from '../types'
+import type {
+  HistoryPoint,
+  MonthSpend,
+  PaneChoice,
+  PaneChoices,
+  PlanUsage,
+  SpendLimit,
+  UsageLimit,
+  UsageSnapshot,
+} from '../types'
 
 const snapshot = atom({ plugin: 'usage-widget', key: 'snapshot' } as const, null)
 const plan = atom({ plugin: 'usage-widget', key: 'plan' } as const, null)
 const history = atom({ plugin: 'usage-widget', key: 'history' } as const, [])
 const isPaneOpen = atom({ plugin: 'usage-widget', key: 'isPaneOpen' } as const, false)
 const monthSpend = atom({ plugin: 'usage-widget', key: 'monthSpend' } as const, null)
+const choices = atom({ plugin: 'usage-widget', key: 'choices' } as const, {})
 const settingError = atom({ plugin: 'usage-widget', key: 'settingError' } as const, null)
 
 const STORE_PANE = 'isPaneOpen'
@@ -31,6 +40,8 @@ const STORE_PLAN = 'plan'
 const SPEND = 'spend:'
 // When the widget first counted spend: a month that began before it is counted from there.
 const STORE_SPEND_SINCE = 'spendSince'
+// The Customize section's choices (PaneChoices), shared by every chat.
+const STORE_CHOICES = 'choices'
 const REFRESH_MS = 60_000
 
 const MINUTE = 60_000
@@ -43,16 +54,6 @@ const PANE = 'usage'
 const PANE_TITLE = 'Usage'
 const COMMAND = 'usage-pane'
 
-// The options `register` receives, as the manifest's `userConfig` declares them. The pane's
-// Customize section changes them through `$.config.set`, as the /config menu does, under these
-// keys; either way the engine stores them in settings and reloads the module with the new values.
-const OPTION = {
-  strip: 'usage-widget.strip',
-  showContext: 'usage-widget.showContext',
-  showCost: 'usage-widget.showCost',
-  monthlyBudget: 'usage-widget.monthlyBudget',
-}
-
 // Which plan limits each choice of `strip` shows; `All` shows every one the account reports.
 const STRIP_GROUPS: Record<string, readonly Group[]> = {
   '5-hour and weekly': ['five', 'weekly'],
@@ -64,6 +65,10 @@ const STRIP_CHOICES = ['All', ...Object.keys(STRIP_GROUPS)]
 
 type Group = 'five' | 'weekly' | 'monthly' | 'other'
 
+// What the strip shows: the options `register` receives, as the manifest's `userConfig` declares
+// them (from /config, or the install screen), each overridden by the Usage pane's choice for it.
+// The pane keeps its choices in the store rather than writing the options: a session the desktop
+// app hosts has no /config rows for a plugin, so `$.config.set` has nothing to write there.
 type Prefs = {
   strip: string
   showContext: boolean
@@ -190,12 +195,17 @@ type Meter = {
 }
 
 export const register: Register = (on, options) => {
-  const prefs = prefsOf(options)
+  const fromOptions = prefsOf(options)
 
   on('session.start', async ($, e, next) => {
     // Keeps the reset countdowns current between measurements; the read itself is free,
-    // and a missed one just leaves the last figures up until the next.
-    $.clock.every(REFRESH_MS, () => void refresh($).catch(() => undefined))
+    // and a missed one just leaves the last figures up until the next. A choice made in another
+    // chat's pane reaches this one on the same beat.
+    $.clock.every(REFRESH_MS, () => {
+      void refresh($).catch(() => undefined)
+      void restoreChoices($, fromOptions).catch(() => undefined)
+    })
+    await restoreChoices($, fromOptions).catch(() => undefined)
     await restorePlan($).catch(() => undefined)
     await refresh($)
     // The band draws without either: a command or a pane that will not come up costs only itself.
@@ -276,6 +286,7 @@ export const register: Register = (on, options) => {
     const account = await read($, plan)
     const paneOpen = await read($, isPaneOpen)
     const spend = await read($, monthSpend)
+    const prefs = prefsWith(fromOptions, await read($, choices))
     const elements = $.ui.resolve(e)
     const { Box, Button, Text } = elements
     // The desktop draws each bar as a small vector strip, so it can be thin and carry a tick;
@@ -420,6 +431,7 @@ export const register: Register = (on, options) => {
     const account = await read($, plan)
     const points = await read($, history)
     const spend = await read($, monthSpend)
+    const prefs = prefsWith(fromOptions, await read($, choices))
     const error = await read($, settingError)
     const meters = metersOf(usage, account, isCardHeld(), budgetOf(prefs, spend))
     const limits = meters.filter(hasBar).filter(meter => meter.key !== 'context')
@@ -451,12 +463,11 @@ export const register: Register = (on, options) => {
       </Text>
     )
 
-    // A change goes through as the /config menu's would: stored in settings, then the module
-    // reloads with it. One the engine refuses says why, under the controls, until the next goes in.
-    const setOption = (key: string, value: ConfigValue) =>
-      void $.config
-        .set({ key, value })
-        .then(result => update($, settingError, () => result.deny ?? null))
+    // A change is kept for every chat and drawn at once. One that could not be kept says so,
+    // under the controls, until the next goes in.
+    const choose = <K extends keyof Prefs>(field: K, value: Prefs[K]) =>
+      void keepChoice($, fromOptions, field, value)
+        .then(() => update($, settingError, () => null))
         .catch(() => update($, settingError, () => "Couldn't save that setting."))
 
     const saveBudget = (text: string) => {
@@ -465,7 +476,7 @@ export const register: Register = (on, options) => {
       if (amount === undefined) {
         void update($, settingError, () => 'Enter an amount above $0, or leave it empty for none.').catch(() => undefined)
       } else {
-        setOption(OPTION.monthlyBudget, amount)
+        choose('monthlyBudget', amount)
       }
     }
 
@@ -565,7 +576,7 @@ export const register: Register = (on, options) => {
         )}
         {Select === undefined ? (
           <Text size="footnote" dimColor wrap="wrap">
-            Choose what the strip shows in /config.
+            Choose what the strip shows in this pane on your computer.
           </Text>
         ) : (
           <Box key="pane-customize" flexDirection="column" rowGap={1}>
@@ -575,21 +586,21 @@ export const register: Register = (on, options) => {
               label="Strip shows"
               options={STRIP_CHOICES.map(value => ({ value }))}
               value={prefs.strip}
-              onSelect={value => setOption(OPTION.strip, value)}
+              onSelect={value => choose('strip', value)}
             />
             <Select
               key="show-context"
               label="Context"
               options={SHOWN_CHOICES}
               value={prefs.showContext ? 'shown' : 'hidden'}
-              onSelect={value => setOption(OPTION.showContext, value === 'shown')}
+              onSelect={value => choose('showContext', value === 'shown')}
             />
             <Select
               key="show-cost"
               label="This chat's cost"
               options={SHOWN_CHOICES}
               value={prefs.showCost ? 'shown' : 'hidden'}
-              onSelect={value => setOption(OPTION.showCost, value === 'shown')}
+              onSelect={value => choose('showCost', value === 'shown')}
             />
             {ownMonthly !== undefined && (
               <Text size="footnote" dimColor wrap="wrap">
@@ -761,6 +772,67 @@ function prefsOf(options: PluginOptions | undefined): Prefs {
     showCost: options?.showCost !== false,
     monthlyBudget: typeof budget === 'number' && Number.isFinite(budget) && budget > 0 ? budget : 0,
   }
+}
+
+const DEFAULT_PREFS = prefsOf(undefined)
+
+/** The options, each overridden by the pane's choice while the option holds what it was made over. */
+function prefsWith(base: Prefs, chosen: PaneChoices): Prefs {
+  const pick = <K extends keyof Prefs>(field: K): Prefs[K] => {
+    const choice = chosen[field] as PaneChoice<Prefs[K]> | undefined
+
+    return choice !== undefined && choice.over === base[field] ? choice.value : base[field]
+  }
+
+  return { strip: pick('strip'), showContext: pick('showContext'), showCost: pick('showCost'), monthlyBudget: pick('monthlyBudget') }
+}
+
+/** The choices as the store holds them, each checked: one of the wrong kind is left out. */
+function choicesOf(stored: unknown): PaneChoices {
+  const isPref = (field: keyof Prefs, value: unknown) =>
+    typeof value === typeof DEFAULT_PREFS[field] && prefsOf({ [field]: value as string | number | boolean })[field] === value
+  const kept: Record<string, PaneChoice<unknown>> = {}
+
+  if (typeof stored === 'object' && stored !== null) {
+    for (const [field, choice] of Object.entries(stored)) {
+      if (
+        field in DEFAULT_PREFS &&
+        typeof choice === 'object' &&
+        choice !== null &&
+        isPref(field as keyof Prefs, choice.value) &&
+        isPref(field as keyof Prefs, choice.over)
+      ) {
+        kept[field] = { value: choice.value, over: choice.over }
+      }
+    }
+  }
+
+  return kept as PaneChoices
+}
+
+/**
+ * Brings in the pane's choices as the store keeps them, whichever chat made them. One whose option
+ * has changed since (in /config, or settings) is dropped: the newer word wins.
+ */
+async function restoreChoices($: EngineInterface, base: Prefs) {
+  const stored = await $.store.get(STORE_CHOICES)
+  const current = Object.fromEntries(
+    Object.entries(choicesOf(stored)).filter(([field, choice]) => choice.over === base[field as keyof Prefs]),
+  ) as PaneChoices
+
+  if (stored !== undefined && JSON.stringify(current) !== JSON.stringify(stored)) {
+    await $.store.set(STORE_CHOICES, current)
+  }
+
+  await update($, choices, before => (JSON.stringify(before) === JSON.stringify(current) ? before : current))
+}
+
+/** Keeps one choice from the pane, beside what other chats kept, and draws it at once. */
+async function keepChoice<K extends keyof Prefs>($: EngineInterface, base: Prefs, field: K, value: Prefs[K]) {
+  const kept = { ...choicesOf(await $.store.get(STORE_CHOICES)), [field]: { value, over: base[field] } } as PaneChoices
+
+  await $.store.set(STORE_CHOICES, kept)
+  await update($, choices, () => kept)
 }
 
 function groupOf(key: string): Group {

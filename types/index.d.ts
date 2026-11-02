@@ -60,6 +60,21 @@ export type MonthSpend = {
   since?: number
 }
 
+/** A choice made in the Usage pane's Customize section. */
+export type PaneChoice<T> = {
+  value: T
+  /** What the option held when the choice was made: once the option changes, it wins. */
+  over: T
+}
+
+/** The Customize section's choices, kept across sessions; a field left out follows the option. */
+export type PaneChoices = {
+  strip?: PaneChoice<string>
+  showContext?: PaneChoice<boolean>
+  showCost?: PaneChoice<boolean>
+  monthlyBudget?: PaneChoice<number>
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'usage-widget': {
@@ -69,6 +84,7 @@ declare module 'claude-code' {
       history: HistoryPoint[]
       isPaneOpen: boolean
       monthSpend: MonthSpend | null
+      choices: PaneChoices
       /** Why the pane's last change to a setting did not go through, until the next one does. */
       settingError: string | null
     }
