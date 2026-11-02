@@ -1,6 +1,6 @@
 {
   "name": "usage-widget",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "description": "A calm usage strip above the prompt: context, your plan's 5-hour and weekly limits or a monthly budget with pace, and what this chat cost. You choose what it shows, and a Usage pane adds resets, projections and the context trend.",
   "types": "./types/index.d.ts",
   "userConfig": {
@@ -13,6 +13,8 @@
         "5-hour and weekly",
         "5-hour and monthly",
         "Weekly and monthly",
+        "5-hour only",
+        "Weekly only",
         "Monthly only"
       ],
       "default": "All"

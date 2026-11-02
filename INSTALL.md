@@ -49,10 +49,11 @@ or under `pluginConfigs` → `usage-widget` → `options` in `~/.claude/settings
 there later takes over from the pane's choice for that option.
 
 - **Strip shows**: `All` (the default), `5-hour and weekly`, `5-hour and monthly`,
-  `Weekly and monthly` or `Monthly only`. A limit you've hidden comes back into the strip while it
-  needs attention: from 75%, or when you're on pace to reach it before it resets. A choice your
-  account doesn't report gives way to what it does, so a work seat shows its monthly budget
-  whatever you pick.
+  `Weekly and monthly`, `5-hour only`, `Weekly only` or `Monthly only`. The pane offers only the
+  choices your account can show: one with no 5-hour limit isn't offered the 5-hour choices. A
+  limit you've hidden comes back into the strip while it needs attention: from 75%, or when you're
+  on pace to reach it before it resets. A choice your account doesn't report gives way to what it
+  does, so a work seat shows its monthly budget whatever you pick.
 - **Context** and **This chat's cost**: shown or hidden.
 - **Monthly budget**: a dollar amount to measure an estimate of this month's spending against.
 
@@ -115,6 +116,14 @@ the watch is on: every commit or pull counts as a change.
 
 Remove the `CLAUDE_CODE_PLUGIN_DIRS` line from `~/.claude/settings.json` (or just this mod's
 path, if you load several), delete the `usage-widget` folder, and restart the app.
+
+## What's new in 0.5.1
+
+- **Strip shows** adds `Weekly only` and `5-hour only`, and the pane offers only the choices your
+  account can show, so a plan with no 5-hour limit isn't offered one.
+- The strip fits a narrow window: the hints go first, then the chat's cost loses its name and
+  `Held` its age, then the totals (`of $150`). Past that, the meters move onto a second row
+  instead of running into each other. The pane's rows wrap the same way.
 
 ## What's new in 0.5.0
 

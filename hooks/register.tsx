@@ -63,10 +63,13 @@ const PANE_TITLE = 'Usage'
 const COMMAND = 'usage-pane'
 
 // Which plan limits each choice of `strip` shows; `All` shows every one the account reports.
+// The manifest's `strip` options list the same choices, in this order.
 const STRIP_GROUPS: Record<string, readonly Group[]> = {
   '5-hour and weekly': ['five', 'weekly'],
   '5-hour and monthly': ['five', 'monthly'],
   'Weekly and monthly': ['weekly', 'monthly'],
+  '5-hour only': ['five'],
+  'Weekly only': ['weekly'],
   'Monthly only': ['monthly'],
 }
 const STRIP_CHOICES = ['All', ...Object.keys(STRIP_GROUPS)]
@@ -318,77 +321,76 @@ export const register: Register = (on, options) => {
     const toggle = () => void (paneOpen ? closePane($) : openPane($)).catch(() => undefined)
 
     if (Svg !== undefined) {
-      // Each meter takes an equal share of the row (flex 1 1 0), so together they run right up
-      // to what follows, and its bar is drawn in percentages of whatever width that share has.
-      // The share's estimated cells decide only whether its hint fits.
-      const share = { flexGrow: 1, flexShrink: 1, width: 0, minWidth: 0 }
-      const tail =
-        (cost === undefined ? 0 : textCells(`${cost.value} ${cost.short}`) + GAP_CELLS) +
-        (held === undefined ? 0 : textCells(held) + GAP_CELLS) +
-        (missing === undefined ? 0 : textCells(missing) + GAP_CELLS) +
-        toggleLabel.length +
-        4
-      const room = columns - 2 - tail
-      const cells = (room - (barred.length - 1) * GAP_CELLS) / Math.max(barred.length, 1)
+      // The meters fill the row up to what follows them, each growing from what its own line
+      // needs (desktopFit), its bar drawn in percentages of whatever width that comes to. Too
+      // narrow for even the plainest lines side by side, they wrap onto a row of their own rather
+      // than run into each other; what follows them keeps its place at the row's end.
+      const fit = desktopFit(barred, columns, { cost, held, missing, toggleLabel })
 
       return (
         <Box flexDirection="row" alignItems="flex-start" columnGap={GAP_CELLS} paddingX={1}>
-          {barred.map(meter => {
-            const isHeld = held !== undefined && meter.source === 'card'
-            // Only a share too narrow for the whole line drops the hint, before it would run into the figure.
-            const hasHint = meter.hint !== undefined && !isHeld && lineCells(meter) <= cells
+          <Box flexDirection="row" flexWrap="wrap" flexGrow={1} flexShrink={1} minWidth={0} columnGap={GAP_CELLS} rowGap="xs">
+            {barred.map(meter => {
+              const isHeld = held !== undefined && meter.source === 'card'
+              const hasHint = fit.hasHints && meter.hint !== undefined && !isHeld
+              const of = fit.hasTotals ? meter.of : undefined
 
-            return (
-              <Box key={meter.key} flexDirection="column" {...share}>
-                <Box flexDirection="row" justifyContent="space-between" columnGap={1}>
-                  <Box flexDirection="row" columnGap={1}>
-                    <Text size="footnote" dimColor wrap="truncate">
-                      {meter.short}
-                    </Text>
-                    <Text size="footnote" weight="medium" tabular {...emphasis(meter, isHeld)}>
-                      {meter.value}
-                    </Text>
-                    {meter.of !== undefined && (
-                      <Text size="footnote" dimColor>
-                        {meter.of}
+              return (
+                <Box key={meter.key} flexDirection="column" flexGrow={1} flexShrink={1} width={0} minWidth={lineCells(meter, of, hasHint)}>
+                  <Box flexDirection="row" justifyContent="space-between" columnGap={1}>
+                    <Box flexDirection="row" columnGap={1}>
+                      <Text size="footnote" dimColor wrap="truncate">
+                        {meter.short}
+                      </Text>
+                      <Text size="footnote" weight="medium" tabular {...emphasis(meter, isHeld)}>
+                        {meter.value}
+                      </Text>
+                      {of !== undefined && (
+                        <Text size="footnote" dimColor wrap="truncate">
+                          {of}
+                        </Text>
+                      )}
+                    </Box>
+                    {hasHint && (
+                      <Text size="footnote" tabular wrap="truncate" {...hintStyle(meter)}>
+                        {meter.hint}
                       </Text>
                     )}
                   </Box>
-                  {hasHint && (
-                    <Text size="footnote" tabular wrap="truncate" {...hintStyle(meter)}>
-                      {meter.hint}
-                    </Text>
-                  )}
+                  <Svg source={barSvg(meter, BAND_BAR, isHeld)} alt={meter.detail} isInteractive height={stripHeight(BAND_BAR)} />
                 </Box>
-                <Svg source={barSvg(meter, BAND_BAR, isHeld)} alt={meter.detail} isInteractive height={stripHeight(BAND_BAR)} />
-              </Box>
-            )
-          })}
-          {held !== undefined && (
-            <Text size="footnote" dimColor>
-              {held}
-            </Text>
-          )}
-          {missing !== undefined && (
-            <Text size="footnote" dimColor wrap="truncate">
-              {missing}
-            </Text>
-          )}
-          {cost !== undefined && (
-            <Box flexDirection="row" columnGap={1}>
-              <Text size="footnote" weight="medium" tabular>
-                {cost.value}
-              </Text>
+              )
+            })}
+          </Box>
+          <Box flexDirection="row" flexShrink={0} columnGap={GAP_CELLS}>
+            {held !== undefined && (
               <Text size="footnote" dimColor>
-                {cost.short}
+                {fit.isTailShort ? 'Held' : held}
               </Text>
-            </Box>
-          )}
-          <Button key="toggle" plain dimColor label={toggleLabel} onPress={toggle}>
-            <Text size="footnote" dimColor>
-              {toggleLabel}
-            </Text>
-          </Button>
+            )}
+            {missing !== undefined && !fit.isTailShort && (
+              <Text size="footnote" dimColor>
+                {missing}
+              </Text>
+            )}
+            {cost !== undefined && (
+              <Box flexDirection="row" columnGap={1}>
+                <Text size="footnote" weight="medium" tabular>
+                  {cost.value}
+                </Text>
+                {!fit.isTailShort && (
+                  <Text size="footnote" dimColor>
+                    {cost.short}
+                  </Text>
+                )}
+              </Box>
+            )}
+            <Button key="toggle" plain dimColor label={toggleLabel} onPress={toggle}>
+              <Text size="footnote" dimColor>
+                {toggleLabel}
+              </Text>
+            </Button>
+          </Box>
         </Box>
       )
     }
@@ -473,6 +475,8 @@ export const register: Register = (on, options) => {
     // The card's server is the desktop app's; a terminal has none to read.
     const canRead = isCard && e.surface !== 'terminal'
 
+    // Each row below with a figure at either end wraps in a narrow pane, its right end going under
+    // its left, rather than the two running into each other.
     const section = (title: string) => (
       <Text size="footnote" dimColor>
         {title}
@@ -509,7 +513,7 @@ export const register: Register = (on, options) => {
 
           return (
             <Box key={`pane-${meter.key}`} flexDirection="column">
-              <Box flexDirection="row" justifyContent="space-between" alignItems="flex-end" columnGap={1}>
+              <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" alignItems="flex-end" columnGap={1}>
                 <Text>{meter.title}</Text>
                 <Box flexDirection="row" columnGap={1}>
                   <Text size="heading" weight="semibold" tabular {...emphasis(meter, isHeld)}>
@@ -523,7 +527,7 @@ export const register: Register = (on, options) => {
               ) : (
                 <Svg source={barSvg(meter, PANE_BAR, isHeld)} alt={meter.detail} isInteractive height={stripHeight(PANE_BAR)} />
               )}
-              <Box flexDirection="row" justifyContent="space-between" columnGap={1}>
+              <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" columnGap={1}>
                 <Text size="footnote" dimColor wrap="truncate">
                   {meter.resets ?? 'Plan limit'}
                 </Text>
@@ -543,7 +547,7 @@ export const register: Register = (on, options) => {
         })}
         {section('This chat')}
         <Box key="pane-context" flexDirection="column">
-          <Box flexDirection="row" justifyContent="space-between" alignItems="flex-end" columnGap={1}>
+          <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" alignItems="flex-end" columnGap={1}>
             <Text>Context</Text>
             <Box flexDirection="row" columnGap={1}>
               <Text size="heading" weight="semibold" tabular {...emphasis(meters[0], false)}>
@@ -558,7 +562,7 @@ export const register: Register = (on, options) => {
             ) : (
               <Svg source={sparkSvg(points, context.window)} alt={trendOf(points)} height={SPARK_HEIGHT} />
             ))}
-          <Box flexDirection="row" justifyContent="space-between" columnGap={1}>
+          <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" columnGap={1}>
             <Text size="footnote" dimColor>
               {context.tokens === undefined ? `${tokens(context.window)} window` : `${tokens(Math.max(context.window - context.tokens, 0))} free`}
             </Text>
@@ -569,7 +573,7 @@ export const register: Register = (on, options) => {
         </Box>
         {cost !== undefined && (
           <Box key="pane-cost" flexDirection="column">
-            <Box flexDirection="row" justifyContent="space-between" alignItems="flex-end" columnGap={1}>
+            <Box flexDirection="row" flexWrap="wrap" justifyContent="space-between" alignItems="flex-end" columnGap={1}>
               <Text>Cost</Text>
               <Text size="heading" weight="semibold" tabular>
                 {cost.value}
@@ -600,7 +604,7 @@ export const register: Register = (on, options) => {
             <Select
               key="strip"
               label="Strip shows"
-              options={STRIP_CHOICES.map(value => ({ value }))}
+              options={stripChoicesFor(meters, prefs.strip).map(value => ({ value }))}
               value={prefs.strip}
               onSelect={value => choose('strip', value)}
             />
@@ -888,6 +892,24 @@ function groupOf(key: string): Group {
   if (key === 'spend_limit' || key === 'budget') return 'monthly'
 
   return 'other'
+}
+
+/**
+ * The strip choices this account can show: each whose limits it reports, so an account with no
+ * 5-hour window (a work seat, some plans) is offered no 5-hour choice. Monthly is always on offer,
+ * a budget standing in where the account has no monthly figure. Until the account reports any
+ * limit, every choice is offered; the one in effect always is, so the picker can show it.
+ */
+function stripChoicesFor(meters: Meter[], current: string) {
+  const reported = new Set(meters.filter(meter => meter.key !== 'context' && meter.key !== 'cost').map(meter => groupOf(meter.key)))
+
+  if (reported.size === 0) {
+    return STRIP_CHOICES
+  }
+
+  reported.add('monthly')
+
+  return STRIP_CHOICES.filter(choice => choice === 'All' || choice === current || STRIP_GROUPS[choice]?.every(group => reported.has(group)))
 }
 
 /** A limit the person should see whatever they chose: near it, or on pace to reach it. */
@@ -1543,9 +1565,41 @@ function textCells(text: string) {
   return Math.ceil(text.length * CELLS_PER_CHAR)
 }
 
-/** The cells a meter's line needs on the desktop: its name, figure, total and hint, and the gaps between. */
-function lineCells(meter: Meter) {
-  return textCells([meter.short, meter.value, meter.of, meter.hint].filter(Boolean).join(' ')) + 2
+/** The cells a meter's line needs on the desktop: its name, figure, total and hint as shown, and the gaps between. */
+function lineCells(meter: Meter, of: string | undefined, hasHint: boolean) {
+  return textCells([meter.short, meter.value, of, hasHint ? meter.hint : undefined].filter(Boolean).join(' ')) + 2
+}
+
+/** What the desktop band draws after its meters. */
+type Tail = { cost: Meter | undefined; held: string | undefined; missing: string | undefined; toggleLabel: string }
+
+/**
+ * Fits the desktop band's row to its width, as the terminal's does: the hints drop first, then
+ * what follows the meters shortens (`Held` for `Held · 14m`, the chat's cost without its name,
+ * no budget prompt, which the pane has), then the totals (`of $150`) drop. Past that the meters
+ * keep their plainest lines and wrap, which the row's minimum widths make them do.
+ */
+function desktopFit(meters: Meter[], columns: number, tail: Tail) {
+  const tailCells = (isShort: boolean) =>
+    [
+      tail.held === undefined ? undefined : isShort ? 'Held' : tail.held,
+      isShort ? undefined : tail.missing,
+      tail.cost === undefined ? undefined : isShort ? tail.cost.value : `${tail.cost.value} ${tail.cost.short}`,
+      tail.toggleLabel,
+    ].reduce((sum, text) => (text === undefined ? sum : sum + textCells(text) + GAP_CELLS), 0)
+  const plainest = { hasHints: false, isTailShort: true, hasTotals: false }
+  const tiers = [
+    { hasHints: true, isTailShort: false, hasTotals: true },
+    { hasHints: false, isTailShort: false, hasTotals: true },
+    { hasHints: false, isTailShort: true, hasTotals: true },
+    plainest,
+  ]
+  const fits = (tier: (typeof tiers)[number]) =>
+    meters.reduce((sum, meter) => sum + lineCells(meter, tier.hasTotals ? meter.of : undefined, tier.hasHints) + GAP_CELLS, 2) +
+      tailCells(tier.isTailShort) <=
+    columns
+
+  return tiers.find(fits) ?? plainest
 }
 
 /**

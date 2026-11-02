@@ -1000,6 +1000,55 @@ describe('usage widget', () => {
     }
   })
 
+  test('Strip shows offers only the choices the account can show', { options: { strip: '5-hour and weekly' } }, async ($, on) => {
+    setup(on)
+    // A plan with weekly limits and no 5-hour window, its extra usage off.
+    const card = { ...PERSONAL_CARD, plan: { ...PERSONAL_CARD.plan, windows: PERSONAL_CARD.plan.windows.slice(1) } }
+    const asked = countingCard(on, card)
+    await begin($)
+    await $.ui.mount({ ...band(), surface: 'desktop' }).then(ui => ui.unmount())
+
+    const offered = async () => {
+      const details = await $.ui.mount({ ...pane(), surface: 'desktop' })
+      const picker = (await details.findAll({ type: 'Select' })).find(found => found.key === 'strip')
+      await details.unmount()
+
+      return (picker?.props.options as { value: string }[] | undefined)?.map(option => option.value)
+    }
+
+    // No 5-hour choice, but the one in effect stays, so the picker can show it.
+    expect(await offered()).toEqual(['All', '5-hour and weekly', 'Weekly and monthly', 'Weekly only', 'Monthly only'])
+
+    // A plan with both windows is offered every choice.
+    asked.card = PERSONAL_CARD
+    await $.ui.mount({ ...pane(), surface: 'desktop' }).then(details => details.press({ key: 'read-now' }).then(() => details.unmount()))
+    expect(await offered()).toEqual([
+      'All',
+      '5-hour and weekly',
+      '5-hour and monthly',
+      'Weekly and monthly',
+      '5-hour only',
+      'Weekly only',
+      'Monthly only',
+    ])
+  })
+
+  test('weekly only shows the weekly limit alone', { options: { strip: 'Weekly only' } }, async ($, on) => {
+    setup(on)
+    withCard(on, PERSONAL_CARD)
+    await begin($)
+
+    for (const surface of SURFACES) {
+      const ui = await $.ui.mount({ ...band(), surface })
+      const shown = await words(ui)
+
+      expect(shown).toContain('Weekly')
+      expect(shown).not.toContain('5-hour')
+      expect(shown).not.toContain('Monthly')
+      await ui.unmount()
+    }
+  })
+
   // What other chats cost this month, as their own keys hold it; this session adds its $1.50.
   const SPENT_ELSEWHERE = { 'spend:2026-10:default:111': { from: 0, to: 84.9 } }
 
@@ -1453,7 +1502,7 @@ describe('usage widget', () => {
     await ui.unmount()
   })
 
-  test('desktop meters share the whole row, and each bar runs its whole share', async ($, on) => {
+  test('desktop meters fill the row, and a band too narrow for them wraps rather than overlaps', async ($, on) => {
     setup(on)
     await $.session.measure({
       context: CONTEXT,
@@ -1465,13 +1514,24 @@ describe('usage widget', () => {
       changed: ['context', 'rateLimits', 'cost'],
     })
 
-    for (const columns of [60, 120, 220]) {
+    for (const columns of [40, 120, 220]) {
       const ui = await $.ui.mount({ ...band(columns), surface: 'desktop' })
-      const slots = (await ui.findAll({ type: 'Box' })).filter(found => ['context', 'five_hour', 'seven_day'].includes(String(found.key)))
+      const boxes = await ui.findAll({ type: 'Box' })
+      const slots = boxes.filter(found => ['context', 'five_hour', 'seven_day'].includes(String(found.key)))
 
       expect(slots.length).toBe(3)
-      expect(slots.every(slot => slot.props.flexGrow === 1 && slot.props.width === 0 && slot.props.minWidth === 0)).toBe(true)
-      expect((await ui.findAll({ type: 'Box' })).some(found => found.props.flexWrap === 'wrap')).toBe(false)
+      // Each grows from what its own line needs, so together they run right up to what follows,
+      // and none is ever squeezed narrower than its line, which is what made them overlap.
+      expect(slots.every(slot => slot.props.flexGrow === 1 && slot.props.width === 0 && Number(slot.props.minWidth) > 0)).toBe(true)
+      // Past room for every line side by side, the meters wrap: their row may.
+      expect(boxes.some(found => found.props.flexWrap === 'wrap')).toBe(true)
+
+      const needed = slots.reduce((sum, slot) => sum + Number(slot.props.minWidth) + 2, 0)
+
+      if (columns >= 120) {
+        // Room for them side by side: one row, filled end to end.
+        expect(needed).toBeLessThan(columns)
+      }
 
       // No width guessed from the column count: each bar is its share's whole width, end to end.
       for (const found of await ui.findAll({ type: 'Svg' })) {
@@ -1481,6 +1541,62 @@ describe('usage widget', () => {
       }
       await ui.unmount()
     }
+  })
+
+  test('a narrowing desktop band drops the hints, then shortens what follows, then the totals', async ($, on) => {
+    setup(on)
+    withCard(on, WORK_CARD)
+    await begin($)
+
+    const texts = async (columns: number) => {
+      const ui = await $.ui.mount({ ...band(columns), surface: 'desktop' })
+      const found = (await ui.findAll({ type: 'Text' })).map(text => text.text)
+      await ui.unmount()
+
+      return found
+    }
+    // The widest band at which each detail is gone.
+    const goneAt = async (isGone: (shown: string[]) => boolean) => {
+      for (let columns = 200; columns >= 10; columns -= 1) {
+        if (isGone(await texts(columns))) {
+          return columns
+        }
+      }
+
+      return 0
+    }
+
+    // The context's token count, and the monthly cap's pace: this seat is on pace to pass it.
+    const isHint = (text: string) => text === '84k' || text.startsWith('limit in')
+    const wide = await texts(200)
+    expect(wide.filter(isHint).length).toBe(2)
+    expect(wide).toContain('this chat')
+    expect(wide).toContain('of $150')
+
+    const hints = await goneAt(shown => !shown.some(isHint))
+    const tail = await goneAt(shown => !shown.includes('this chat'))
+    const totals = await goneAt(shown => !shown.includes('of $150'))
+    expect(hints).toBeGreaterThan(tail)
+    expect(tail).toBeGreaterThan(totals)
+    expect(totals).toBeGreaterThan(10)
+
+    // However narrow, every figure and the button stay.
+    const narrowest = await texts(10)
+    for (const figure of ['42%', '$46.50', '$1.50', 'Details']) {
+      expect(narrowest).toContain(figure)
+    }
+  })
+
+  test('the pane’s two-sided rows wrap rather than collide in a narrow pane', async ($, on) => {
+    setup(on)
+    withCard(on, WORK_CARD)
+    await begin($)
+
+    const details = await $.ui.mount({ ...pane(24), surface: 'desktop' })
+    const rows = (await details.findAll({ type: 'Box' })).filter(found => found.props.justifyContent === 'space-between')
+    expect(rows.length).toBeGreaterThan(0)
+    expect(rows.every(row => row.props.flexWrap === 'wrap')).toBe(true)
+    await details.unmount()
   })
 
   test('reads usage at start and keeps countdowns ticking', async ($, on) => {
