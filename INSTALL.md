@@ -54,13 +54,18 @@ there later takes over from the pane's choice for that option.
   account doesn't report gives way to what it does, so a work seat shows its monthly budget
   whatever you pick.
 - **Context** and **This chat's cost**: shown or hidden.
-- **Monthly budget**: a dollar amount to measure this month's spending against, for an account
-  that reports no monthly budget of its own. Where your account reports one (a work seat, or
-  extra usage turned on), that one is always used and this field gives way to a note saying so.
+- **Monthly budget**: a dollar amount to measure an estimate of this month's spending against.
 
-A budget you set is measured against what your Claude Code chats cost this month (UTC),
-estimated at API rates: the same figure as each chat's cost, added up across every chat the
-widget runs in, and counted from when you installed 0.5.0. A chat that began in an earlier month
+Monthly shows your account's own figure, with nothing to set: a work seat's monthly budget, or a
+personal plan's extra usage, marked `off` while it's switched off. Those are the only monthly
+figures an account reports in dollars; a Pro, Max or Ultra plan's own limits are the 5-hour and
+weekly percentages. A budget you set takes the place of extra usage that's off. A work seat's
+budget, or extra usage that's on, always stands, and the field gives way to a note saying so.
+
+A budget you set is measured against an estimate: what this account's Claude Code chats cost this
+month (UTC) at API rates, the same figure as each chat's cost, added up across every chat the
+widget runs in, and counted from when you installed 0.5.0. Each account counts only its own
+chats, so the desktop app's work and personal profiles stay apart. A chat that began in an earlier month
 counts only what it adds this month: from where it stood when the month began if the widget saw
 it last month, otherwise from the first time the widget sees it this month. It's not what you're
 billed, and chats on claude.ai on the web or phone aren't counted. On a Pro or Max plan the 5-hour and weekly
@@ -115,9 +120,13 @@ path, if you load several), delete the `usage-widget` folder, and restart the ap
 
 - Choose what the strip shows: which plan limits, and whether it shows the context and this
   chat's cost. Set it in the Usage pane's new **Customize** section.
-- A monthly budget of your own, measured against what your Claude Code chats cost this month,
-  with the same pace tick and warnings as the other limits. Where your account reports a monthly
-  budget of its own, as a work seat does, that one is used instead.
+- Monthly shows your account's own monthly figure by default: a work seat's budget, or a
+  personal plan's extra usage, even while it's switched off.
+- A monthly budget of your own, measured against an estimate of what the account's Claude Code
+  chats cost this month, with the same pace tick and warnings as the other limits. It replaces
+  extra usage that's off; a work seat's budget, or extra usage that's on, is used instead.
+- The last plan limits read are kept per account, so a work chat never shows a personal plan's
+  held figures, or the other way round.
 - A limit you've hidden comes back into the strip while it needs attention.
 - Monthly is now pink, so it never reads as the 5-hour window's purple beside it.
 

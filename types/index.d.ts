@@ -26,6 +26,11 @@ export type SpendLimit = {
   limit: number
   /** ISO 4217, `USD` where the card names none. */
   currency: string
+  /**
+   * Whether the account has it switched on. Off, a personal plan's extra usage spends nothing
+   * past the plan's limits, and a budget the person sets stands in its place.
+   */
+  isOn: boolean
 }
 
 /**
@@ -35,7 +40,7 @@ export type SpendLimit = {
 export type PlanUsage = {
   /** The card's 5-hour, weekly and per-model weekly windows, keyed as the engine's `rateLimits` are. */
   windows: UsageLimit[]
-  /** The monthly spend cap; null where the account has none switched on. */
+  /** The monthly spend cap, on or off; null where the account reports none. */
   spend: SpendLimit | null
   /** `$.clock.now()` when the card was read: how old held figures are. */
   readAt: number

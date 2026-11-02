@@ -44,6 +44,9 @@ const PERSONAL_CARD = {
   context: { session: 'self', status: 'ok' },
 }
 
+/** A personal plan whose card reports no extra usage at all: no monthly figure of its own. */
+const NO_EXTRA_CARD = { ...PERSONAL_CARD, plan: { ...PERSONAL_CARD.plan, extraUsage: undefined } }
+
 const band = (bodyColumns = 140) => ({
   plugin: 'usage-widget',
   component: 'AbovePrompt' as const,
@@ -120,6 +123,11 @@ const memoryStore = (on: On, seed: Record<string, unknown> = {}) => {
   on('store.keys', () => ({ value: [...saved.keys()] }))
 
   return saved
+}
+
+/** The account the desktop app names in each session's environment; none, as a terminal names. */
+const withAccount = (on: On, id?: string) => {
+  on('env.get', (_, e) => ({ value: e.name === 'CLAUDE_CODE_ACCOUNT_UUID' ? id : undefined }))
 }
 
 /** What `$.session.start` takes: the widget reads the card from its own session.start hook. */
@@ -248,8 +256,10 @@ describe('usage widget', () => {
       for (const figure of ['Context', '5-hour', '4%', '3h 40m left', 'Weekly', '1%', '5d 20h left', '$1.50', 'this chat']) {
         expect(shown).toContain(figure)
       }
-      // Extra usage is switched off on this account: no monthly cap to show.
-      expect(shown).not.toContain('Monthly')
+      // Extra usage is switched off on this account: Monthly is the account's own figure, off.
+      for (const figure of ['Monthly', '$0', 'of $50', 'off']) {
+        expect(shown).toContain(figure)
+      }
       // A model's own weekly window is left out: the all-models weekly is the one shown.
       expect(shown).not.toContain('Fable')
       expect(shown.indexOf('5-hour')).toBeLessThan(shown.indexOf('Weekly'))
@@ -268,7 +278,7 @@ describe('usage widget', () => {
       const ui = await $.ui.mount({ ...band(columns), surface: 'desktop' })
       const bars = await ui.findAll({ type: 'Svg' })
 
-      expect(bars.length).toBe(3)
+      expect(bars.length).toBe(4)
 
       for (const found of bars) {
         const source = String(found.props.source)
@@ -368,14 +378,15 @@ describe('usage widget', () => {
     expect(shown).toContain('Monthly')
     expect(shown).not.toContain('5-hour')
 
-    // Work to personal: the monthly cap leaves with the work account, the windows arrive with
-    // the next read, the turn's end.
+    // Work to personal: the work seat's cap gives way to the personal account's extra usage, and
+    // the windows arrive with the next read, the turn's end.
     asked.card = PERSONAL_CARD
     await clock.advance(60_000)
     await $.classic.Stop({ stop_hook_active: false, permission_mode: 'auto' })
     await clock.advance(0)
     shown = await words(ui)
-    expect(shown).not.toContain('Monthly')
+    expect(shown).not.toContain('of $150')
+    expect(shown).toContain('of $50')
     expect(shown).toContain('5-hour')
     expect(shown).toContain('Weekly')
 
@@ -761,8 +772,9 @@ describe('usage widget', () => {
   // never drop out of the band, until this session's first prompt in Auto reads its own.
   test('the last plan limits read come back with a fresh session, held, until it reads its own', async ($, on) => {
     const clock = mock.clock(on, { now: NOW })
+    withAccount(on)
     mock.store(on, {
-      plan: {
+      'plan:default': {
         windows: [
           { kind: 'five_hour', percentUsed: 4, resetsAt: fromNow(3 * HOUR + 40 * MINUTE) },
           { kind: 'seven_day', percentUsed: 29, resetsAt: fromNow(DAY + 16 * HOUR) },
@@ -819,17 +831,19 @@ describe('usage widget', () => {
       return { value: undefined }
     })
     on('session.measure', ($, e) => ({ changed: e.changed }))
+    withAccount(on)
     withPanes(on)
     const asked = countingCard(on)
     await begin($)
     await clock.advance(0)
 
-    expect(saved.get('plan')).toEqual({
+    expect(saved.get('plan:default')).toEqual({
       windows: [
         { kind: 'five_hour', percentUsed: 4, resetsAt: fromNow(3 * HOUR + 40 * MINUTE) },
         { kind: 'seven_day', percentUsed: 1, resetsAt: fromNow(5 * DAY + 20 * HOUR) },
       ],
-      spend: null,
+      // Extra usage, switched off: still the account's own monthly figure.
+      spend: { percentUsed: 0, spent: 0, limit: 50, currency: 'USD', isOn: false },
       readAt: NOW,
     })
 
@@ -838,14 +852,15 @@ describe('usage widget', () => {
     await clock.advance(60_000)
     await $.classic.Stop({ stop_hook_active: false, permission_mode: 'auto' })
     await clock.advance(0)
-    expect(saved.get('plan')).toBeNull()
+    expect(saved.get('plan:default')).toBeNull()
   })
 
   // A 5-hour window read before it reset says nothing true about the one running now.
   test('a held window that has reset since it was read shows no figure', async ($, on) => {
     mock.clock(on, { now: NOW })
+    withAccount(on)
     mock.store(on, {
-      plan: {
+      'plan:default': {
         windows: [
           { kind: 'five_hour', percentUsed: 95, resetsAt: fromNow(-10 * MINUTE) },
           { kind: 'seven_day', percentUsed: 29, resetsAt: fromNow(DAY) },
@@ -877,8 +892,9 @@ describe('usage widget', () => {
 
   test('a held monthly cap read last month shows no figure', async ($, on) => {
     mock.clock(on, { now: NOW })
+    withAccount(on)
     mock.store(on, {
-      plan: { windows: [], spend: { percentUsed: 80, spent: 160, limit: 200, currency: 'USD' }, readAt: Date.parse('2026-09-28T12:00:00Z') },
+      'plan:default': { windows: [], spend: { percentUsed: 80, spent: 160, limit: 200, currency: 'USD' }, readAt: Date.parse('2026-09-28T12:00:00Z') },
     })
     on('session.measure', ($, e) => ({ changed: e.changed }))
     withPanes(on)
@@ -985,12 +1001,13 @@ describe('usage widget', () => {
   })
 
   // What other chats cost this month, as their own keys hold it; this session adds its $1.50.
-  const SPENT_ELSEWHERE = { 'spend:2026-10:111': { from: 0, to: 84.9 } }
+  const SPENT_ELSEWHERE = { 'spend:2026-10:default:111': { from: 0, to: 84.9 } }
 
   test('a monthly budget is measured against what the chats cost this month', { options: { strip: 'Weekly and monthly', monthlyBudget: 200 } }, async ($, on) => {
     mock.clock(on, { now: NOW })
     mock.store(on, SPENT_ELSEWHERE)
     on('session.measure', ($, e) => ({ changed: e.changed }))
+    withAccount(on)
     withPanes(on)
     withCard(on, PERSONAL_CARD)
     await begin($)
@@ -1012,7 +1029,7 @@ describe('usage widget', () => {
 
       expect(spelled).toContain('Monthly budget')
       // Counting began as this session started, on the 6th.
-      expect(spelled).toMatch(/Estimated at API rates across your Claude Code chats since \w{3} \d{1,2}\. Not what you're billed\./)
+      expect(spelled).toMatch(/Estimated at API rates across this account's Claude Code chats since \w{3} \d{1,2}\. Not what you're billed\./)
       expect(spelled).toMatch(/Resets \w{3} \d{1,2}, \d{1,2}:\d{2} [AP]M · in 25d 12h/)
       // The pane shows every limit, whatever the strip shows.
       expect(spelled).toContain('5-hour limit')
@@ -1074,9 +1091,9 @@ describe('usage widget', () => {
     await ui.unmount()
   })
 
-  test('monthly only with no budget asks for one and keeps the limits the account has', { options: { strip: 'Monthly only' } }, async ($, on) => {
+  test('monthly only with no monthly figure and no budget asks for one and keeps the limits the account has', { options: { strip: 'Monthly only' } }, async ($, on) => {
     setup(on)
-    withCard(on, PERSONAL_CARD)
+    withCard(on, NO_EXTRA_CARD)
     await begin($)
 
     for (const surface of SURFACES) {
@@ -1096,12 +1113,13 @@ describe('usage widget', () => {
     const startedAt = Date.parse('2026-09-28T00:00:00Z')
     const saved = memoryStore(on, {
       // This conversation's September, before the month turned.
-      [`spend:2026-09:${startedAt}`]: { from: 0, to: 15 },
+      [`spend:2026-09:default:${startedAt}`]: { from: 0, to: 15 },
       // Another chat this month, begun before it: $10 of its cost is October's.
-      'spend:2026-10:222': { from: 2, to: 12 },
+      'spend:2026-10:default:222': { from: 2, to: 12 },
       // A month long gone.
-      'spend:2026-07:333': { from: 0, to: 99 },
+      'spend:2026-07:default:333': { from: 0, to: 99 },
     })
+    withAccount(on)
     on('session.measure', ($, e) => ({ changed: e.changed }))
     on('session.start', ($, e) => ({ cwd: e.cwd }))
     on('session.usage', () => ({ value: { startedAt, context: CONTEXT, rateLimits: [], cost: { usd: 20 } } }))
@@ -1109,12 +1127,12 @@ describe('usage widget', () => {
     await $.session.start(START)
 
     // $20 in all, $15 of it September's: October's share is $5, beside the other chat's $10.
-    expect(saved.get(`spend:2026-10:${startedAt}`)).toEqual({ from: 15, to: 20 })
-    expect(saved.has('spend:2026-07:333')).toBe(false)
+    expect(saved.get(`spend:2026-10:default:${startedAt}`)).toEqual({ from: 15, to: 20 })
+    expect(saved.has('spend:2026-07:default:333')).toBe(false)
 
     // Read again a minute on (a resume reads the same total): nothing is counted twice.
     await clock.advance(MINUTE)
-    expect(saved.get(`spend:2026-10:${startedAt}`)).toEqual({ from: 15, to: 20 })
+    expect(saved.get(`spend:2026-10:default:${startedAt}`)).toEqual({ from: 15, to: 20 })
 
     const details = await $.ui.mount({ ...pane(), surface: 'desktop' })
     expect(await words(details)).toContain('$15')
@@ -1130,6 +1148,7 @@ describe('usage widget', () => {
       // What an earlier build kept: the chat's whole cost, all of it counted as October's.
       [`spend:2026-10:${startedAt}`]: 2480.15,
     })
+    withAccount(on)
     on('session.measure', ($, e) => ({ changed: e.changed }))
     on('session.start', ($, e) => ({ cwd: e.cwd }))
     on('session.usage', () => ({ value: { startedAt, context: CONTEXT, rateLimits: [], cost: { usd: cost } } }))
@@ -1137,11 +1156,11 @@ describe('usage widget', () => {
     await $.session.start(START)
 
     // Never read in September: October counts from here, not from its first launch.
-    expect(saved.get(`spend:2026-10:${startedAt}`)).toEqual({ from: 2480.15, to: 2480.15 })
+    expect(saved.get(`spend:2026-10:default:${startedAt}`)).toEqual({ from: 2480.15, to: 2480.15 })
 
     cost = 2492.22
     await clock.advance(MINUTE)
-    expect(saved.get(`spend:2026-10:${startedAt}`)).toEqual({ from: 2480.15, to: 2492.22 })
+    expect(saved.get(`spend:2026-10:default:${startedAt}`)).toEqual({ from: 2480.15, to: 2492.22 })
 
     const details = await $.ui.mount({ ...pane(), surface: 'desktop' })
     const spelled = await words(details)
@@ -1150,10 +1169,54 @@ describe('usage widget', () => {
     await details.unmount()
   })
 
+  // The desktop app's work and personal profiles share one store: each counts only its own chats.
+  test('each account counts only its own chats, and keeps its own last card', { options: { monthlyBudget: 100 } }, async ($, on) => {
+    mock.clock(on, { now: NOW })
+    const saved = memoryStore(on, {
+      // The one card an earlier build kept for every account: it may be the other profile's.
+      plan: { windows: [{ kind: 'seven_day', percentUsed: 88, resetsAt: fromNow(DAY) }], spend: null, readAt: NOW - HOUR },
+    })
+    let id = 'work-account'
+    let startedAt = NOW - 2 * HOUR
+    let cost = 30
+    on('env.get', (_, e) => ({ value: e.name === 'CLAUDE_CODE_ACCOUNT_UUID' ? id : undefined }))
+    on('session.measure', ($, e) => ({ changed: e.changed }))
+    on('session.start', ($, e) => ({ cwd: e.cwd }))
+    on('session.usage', () => ({ value: { startedAt, context: CONTEXT, rateLimits: [], cost: { usd: cost } } }))
+    withPanes(on)
+    await $.session.start(START)
+
+    // The shared card is dropped, never shown as this account's.
+    expect(saved.has('plan')).toBe(false)
+    const ui = await $.ui.mount({ ...band(), surface: 'terminal' })
+    expect(await words(ui)).not.toContain('88%')
+    await ui.unmount()
+
+    // A chat on the personal account, in the other profile.
+    id = 'personal-account'
+    startedAt = NOW - HOUR
+    cost = 2
+    await $.session.start(START)
+
+    const spent = [...saved.keys()].filter(key => key.startsWith('spend:2026-10:'))
+    expect(spent.length).toBe(2)
+    expect(new Set(spent.map(key => key.split(':')[2])).size).toBe(2)
+    // The store holds a tag for each account, never its id.
+    expect(spent.some(key => key.includes('account'))).toBe(false)
+
+    const details = await $.ui.mount({ ...pane(), surface: 'desktop' })
+    const spelled = await words(details)
+    expect(spelled).toContain('$2')
+    expect(spelled).toContain('of $100')
+    expect(spelled).not.toContain('$32')
+    await details.unmount()
+  })
+
   test('a budget warns when its pace passes it, and when it is spent', { options: { monthlyBudget: 100 } }, async ($, on) => {
     mock.clock(on, { now: NOW })
-    mock.store(on, { 'spend:2026-10:111': { from: 0, to: 118.5 } })
+    mock.store(on, { 'spend:2026-10:default:111': { from: 0, to: 118.5 } })
     on('session.measure', ($, e) => ({ changed: e.changed }))
+    withAccount(on)
     withPanes(on)
     withCard(on, PERSONAL_CARD)
     await begin($)
@@ -1173,6 +1236,7 @@ describe('usage widget', () => {
     mock.clock(on, { now: NOW })
     mock.store(on, SPENT_ELSEWHERE)
     on('session.measure', ($, e) => ({ changed: e.changed }))
+    withAccount(on)
     withPanes(on)
     withCard(on, PERSONAL_CARD)
     await begin($)
@@ -1224,7 +1288,8 @@ describe('usage widget', () => {
       await details.input({ key: 'budget', text: '' })
       expect(saved.get('choices')).toMatchObject({ monthlyBudget: { value: 0 } })
       expect(await words(details)).not.toContain('Enter an amount')
-      expect(await words(strip)).toContain('Monthly: set a budget in Details')
+      // Cleared: Monthly is the account's own figure again, its extra usage off.
+      expect(await words(strip)).toContain('of $50')
       await strip.unmount()
       await details.unmount()
     }

@@ -4,11 +4,12 @@ A Claude Code mod that adds a one-line usage strip above the prompt in the Claud
 Code tab. It shows:
 
 - how full the context window is
-- your plan's 5-hour and weekly limits (or a work seat's monthly budget), each with a pace marker
+- your plan's 5-hour and weekly limits and your account's monthly figure (a work seat's budget,
+  or a personal plan's extra usage), each with a pace marker
 - what the chat has cost so far
 
 You choose which of these the strip shows, and you can set a monthly budget of your own where
-your account has none.
+your account has none switched on.
 
 **Details** opens a Usage pane with each limit's reset time, where it's heading, and a trend line
 of the context window over the chat.

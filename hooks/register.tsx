@@ -30,14 +30,15 @@ const choices = atom({ plugin: 'usage-widget', key: 'choices' } as const, {})
 const settingError = atom({ plugin: 'usage-widget', key: 'settingError' } as const, null)
 
 const STORE_PANE = 'isPaneOpen'
-// The card last read, kept across sessions: a session the app starts afresh (coming back to a
-// chat, a new one) shows the plan's limits from its first draw, held, until it reads its own.
+// The card last read, kept across sessions under `plan:<account>` (accountOf): a session the app
+// starts afresh (coming back to a chat, a new one) shows its account's limits from its first draw,
+// held, until it reads its own. Earlier builds kept one under `plan` for every account.
 const STORE_PLAN = 'plan'
-// What each conversation has cost in each UTC month, under `spend:<month>:<startedAt>` as a
-// SpendRecord: one key a conversation, which only it writes, so chats running side by side never
-// overwrite each other. `startedAt` holds across a resume, whose cost carries on from the run
-// before, and starts over on /clear, whose cost does too; a session id would count a resumed chat
-// twice.
+// What each conversation has cost in each UTC month, under `spend:<month>:<account>:<startedAt>`
+// as a SpendRecord: one key a conversation, which only it writes, so chats running side by side
+// never overwrite each other, and a work profile's never count toward a personal one's month.
+// `startedAt` holds across a resume, whose cost carries on from the run before, and starts over on
+// /clear, whose cost does too; a session id would count a resumed chat twice.
 const SPEND = 'spend:'
 
 /**
@@ -122,6 +123,9 @@ let isAskingCard = false
 // The figures last drawn, so a redraw is asked for only when they move.
 let shown: string | undefined
 
+// The session's account (accountOf), read once: the environment it comes from never changes.
+let accountTag: string | undefined
+
 // Each meter keeps one hue, drawn only in its bar: mid-tones that read on the app's light and
 // dark themes alike, since an Svg is drawn as an image and cannot follow the theme. Amber and red
 // take the whole bar over as it nears its limit; the figures beside it use the theme's own
@@ -205,6 +209,7 @@ export const register: Register = (on, options) => {
   const fromOptions = prefsOf(options)
 
   on('session.start', async ($, e, next) => {
+    accountTag = undefined
     // Keeps the reset countdowns current between measurements; the read itself is free,
     // and a missed one just leaves the last figures up until the next. A choice made in another
     // chat's pane reaches this one on the same beat.
@@ -446,6 +451,10 @@ export const register: Register = (on, options) => {
     const Select = 'Select' in elements ? elements.Select : undefined
     const Input = 'Input' in elements ? elements.Input : undefined
     const ownMonthly = meters.find(meter => meter.key === 'spend_limit')
+    // Extra usage switched off is the account's figure until a budget stands in for it; one
+    // switched on (a work seat's cap) always stands, and leaves no budget to set.
+    const isOwnOff = account?.spend?.isOn === false
+    const isOwnOn = ownMonthly !== undefined && !isOwnOff
     const cost = meters.find(meter => meter.key === 'cost')
     const held = heldFor(meters, usage, account)
     const isCard = meters.some(meter => meter.source === 'card')
@@ -609,14 +618,14 @@ export const register: Register = (on, options) => {
               value={prefs.showCost ? 'shown' : 'hidden'}
               onSelect={value => choose('showCost', value === 'shown')}
             />
-            {ownMonthly !== undefined && (
+            {isOwnOn && ownMonthly !== undefined && (
               <Text size="footnote" dimColor wrap="wrap">
                 {ownMonthly.of === undefined
                   ? "Monthly budget: using your account's own monthly limit."
                   : `Monthly budget: using your account's own budget ${ownMonthly.of}.`}
               </Text>
             )}
-            {ownMonthly === undefined && Input !== undefined && (
+            {!isOwnOn && Input !== undefined && (
               <Input
                 key="budget"
                 label="Monthly budget ($)"
@@ -625,6 +634,13 @@ export const register: Register = (on, options) => {
                 submitLabel="save"
                 onSubmit={saveBudget}
               />
+            )}
+            {isOwnOff && (
+              <Text size="footnote" dimColor wrap="wrap">
+                {prefs.monthlyBudget > 0
+                  ? "Your account's extra usage is off, so Monthly shows this budget, estimated from this account's Claude Code chats. Clear it to show the account's own figure."
+                  : "Monthly shows your account's extra usage, which is off. A budget here shows an estimate of what this account's Claude Code chats cost instead."}
+              </Text>
             )}
             {error !== null && (
               <Text size="footnote" color="error" wrap="wrap">
@@ -684,7 +700,7 @@ async function refresh($: EngineInterface) {
 
 /**
  * Records what this conversation has cost this month, then totals the month across every
- * conversation the widget ran in: the figure a monthly budget is measured against.
+ * conversation the widget ran in on this account: the figure a monthly budget is measured against.
  *
  * A conversation's cost runs on from its first launch, months included, so each month counts
  * only what it added from where the month's count began (openingCost). Months before last are
@@ -693,12 +709,14 @@ async function refresh($: EngineInterface) {
 async function tallySpend($: EngineInterface, usage: SessionUsage) {
   const now = await $.clock.now()
   const month = monthKey(now)
+  const tag = await accountOf($)
+  const mine = `${SPEND}${month}:${tag}:`
   const cost = usage.cost?.usd
 
   if (cost !== undefined && cost > 0) {
-    const own = `${SPEND}${month}:${usage.startedAt}`
+    const own = `${mine}${usage.startedAt}`
     const kept = spendRecordOf(await $.store.get(own))
-    const from = Math.min(kept?.from ?? (await openingCost($, usage.startedAt, month, cost)), cost)
+    const from = Math.min(kept?.from ?? (await openingCost($, `:${tag}:${usage.startedAt}`, usage.startedAt, month, cost)), cost)
 
     if (kept?.from !== from || kept.to !== cost) {
       await $.store.set(own, { from, to: cost })
@@ -721,7 +739,7 @@ async function tallySpend($: EngineInterface, usage: SessionUsage) {
 
     if (keyMonth < oldest) {
       await $.store.delete(key)
-    } else if (keyMonth === month) {
+    } else if (key.startsWith(mine)) {
       const record = spendRecordOf(await $.store.get(key))
       usd += record === undefined ? 0 : Math.max(record.to - record.from, 0)
     }
@@ -739,16 +757,16 @@ async function tallySpend($: EngineInterface, usage: SessionUsage) {
 /**
  * Where a conversation's count for `month` begins, the first time it is read in the month. One
  * begun in the month starts from nothing: all it has cost is the month's. One begun before starts
- * from where it was last read in an earlier month; read in none, from what it costs now, since
- * how much of that fell in this month can't be told.
+ * from where it was last read in an earlier month (its keys end in `ending`); read in none, from
+ * what it costs now, since how much of that fell in this month can't be told.
  */
-async function openingCost($: EngineInterface, startedAt: number, month: string, cost: number) {
+async function openingCost($: EngineInterface, ending: string, startedAt: number, month: string, cost: number) {
   if (monthKey(startedAt) >= month) {
     return 0
   }
 
   const earlier = (await $.store.keys())
-    .filter(key => key.startsWith(SPEND) && key.endsWith(`:${startedAt}`) && key.slice(SPEND.length, SPEND.length + 7) < month)
+    .filter(key => key.startsWith(SPEND) && key.endsWith(ending) && key.slice(SPEND.length, SPEND.length + 7) < month)
     .sort()
   const last = earlier[earlier.length - 1]
   const record = last === undefined ? undefined : spendRecordOf(await $.store.get(last))
@@ -944,8 +962,8 @@ async function refreshCard($: EngineInterface, atMostEveryMs = 0, isForced = fal
   }
 
   await update($, plan, () => card)
-  // Kept for the next session; one that will not keep costs only that.
-  await $.store.set(STORE_PLAN, card).catch(() => undefined)
+  // Kept for the account's next session; one that will not keep costs only that.
+  await $.store.set(`${STORE_PLAN}:${await accountOf($)}`, card).catch(() => undefined)
 
   // The card answers after the band's first draw, so its meters would otherwise wait for
   // whatever redraws the band next. Asked for only on a change, at most once a cycle.
@@ -958,20 +976,51 @@ async function refreshCard($: EngineInterface, atMostEveryMs = 0, isForced = fal
 }
 
 /**
- * Brings back the card the last session read, where this one has none yet: its figures show
- * held, with their age, until this session reads its own. A stored `null` (an account with no
- * plan limits) brings nothing back, so an older card never stands in for it.
+ * Brings back the card the account's last session read, where this one has none yet: its figures
+ * show held, with their age, until this session reads its own. A stored `null` (an account with no
+ * plan limits) brings nothing back, so an older card never stands in for it. The one card earlier
+ * builds kept for every account is dropped: it may be another account's.
  */
 async function restorePlan($: EngineInterface) {
+  await $.store.delete(STORE_PLAN).catch(() => undefined)
+
   if ((await read($, plan)) !== null) {
     return
   }
 
-  const stored = storedPlanOf(await $.store.get(STORE_PLAN))
+  const stored = storedPlanOf(await $.store.get(`${STORE_PLAN}:${await accountOf($)}`))
 
   if (stored !== undefined) {
     await update($, plan, () => stored)
   }
+}
+
+/**
+ * The session's account as a short tag. The desktop app names the signed-in account and its
+ * organization in each session's environment, so a work profile's chats and a personal one's,
+ * which share this store, are told apart in any mode, before the card is read. A terminal names
+ * neither, and its one login is `default`. Hashed, so the store never holds the ids themselves.
+ */
+async function accountOf($: EngineInterface) {
+  if (accountTag === undefined) {
+    const id = await $.env.get('CLAUDE_CODE_ACCOUNT_UUID').catch(() => undefined)
+    const organization = await $.env.get('CLAUDE_CODE_ORGANIZATION_UUID').catch(() => undefined)
+
+    accountTag = id === undefined && organization === undefined ? 'default' : hashOf(`${organization ?? ''}/${id ?? ''}`)
+  }
+
+  return accountTag
+}
+
+/** FNV-1a, 32 bits, in hex: plenty to tell one person's few accounts apart. */
+function hashOf(text: string) {
+  let hash = 0x811c9dc5
+
+  for (let i = 0; i < text.length; i++) {
+    hash = Math.imul(hash ^ text.charCodeAt(i), 0x01000193) >>> 0
+  }
+
+  return hash.toString(16).padStart(8, '0')
 }
 
 /** A stored card, checked field by field: the store holds whatever an older version wrote. */
@@ -995,7 +1044,14 @@ function storedPlanOf(value: unknown): PlanUsage | undefined {
       typeof spend.spent === 'number' &&
       typeof spend.limit === 'number' &&
       typeof spend.currency === 'string'
-        ? { percentUsed: spend.percentUsed, spent: spend.spent, limit: spend.limit, currency: spend.currency }
+        ? {
+            percentUsed: spend.percentUsed,
+            spent: spend.spent,
+            limit: spend.limit,
+            currency: spend.currency,
+            // Earlier builds kept a cap only while it was switched on.
+            isOn: spend.isOn !== false,
+          }
         : null,
     readAt: value.readAt,
   }
@@ -1108,11 +1164,11 @@ function snake(text: string) {
 }
 
 /**
- * The card's `extraUsage` as a meter's figures, or null where it reports none: a seat with
- * no spend limit, a limit switched off, or a figure the card left out.
+ * The card's `extraUsage` as a meter's figures, switched on or off, or null where it reports none:
+ * a seat with no spend limit, or a figure the card left out.
  */
 function spendOf(extra: unknown): SpendLimit | null {
-  if (!isRecord(extra) || extra.enabled !== true) {
+  if (!isRecord(extra)) {
     return null
   }
 
@@ -1124,7 +1180,7 @@ function spendOf(extra: unknown): SpendLimit | null {
     return null
   }
 
-  return { percentUsed, spent, limit, currency: typeof extra.currency === 'string' ? extra.currency : 'USD' }
+  return { percentUsed, spent, limit, currency: typeof extra.currency === 'string' ? extra.currency : 'USD', isOn: extra.enabled === true }
 }
 
 function parse(text: string): unknown {
@@ -1182,12 +1238,13 @@ function budgetOf(prefs: Prefs, spend: MonthSpend | null): Budget | undefined {
 
 /**
  * The meters, in order. `isHeld` says the card's figures are held back: one of them whose window
- * has reset since it was read says nothing true any more, and shows no figure. `budget` adds a
- * monthly meter where the account reports no monthly figure of its own; where it does, that one
- * stands and the budget is set aside.
+ * has reset since it was read says nothing true any more, and shows no figure. Monthly is the
+ * account's own figure where it reports one; `budget` stands in for it where the account reports
+ * none, or reports extra usage switched off. One switched on is always the truer, and stands.
  */
 function metersOf(usage: UsageSnapshot, account: PlanUsage | null, isHeld = false, budget?: Budget): Meter[] {
-  const spend = account?.spend ?? null
+  const reportedSpend = account?.spend ?? null
+  const spend = reportedSpend !== null && (reportedSpend.isOn || budget === undefined) ? reportedSpend : null
   const { context, measuredAt: now } = usage
   const percent = context.percent === undefined ? '—' : `${Math.round(context.percent)}%`
   const meters: Meter[] = [
@@ -1249,8 +1306,27 @@ function metersOf(usage: UsageSnapshot, account: PlanUsage | null, isHeld = fals
 
   // What the month has cost against the seat's cap: a work account's only usage limit, and
   // the one its settings page shows. Reported in money, so the figure reads as the card's.
+  // A personal plan's extra usage switched off still reports its cap: the account's own figure,
+  // shown as it stands, with no pace, since nothing spends against it.
   if (spend !== null && account !== null && isHeld && monthEnd(account.readAt) <= now) {
     meters.push({ ...lapsed('spend_limit', 'Monthly', 'Monthly spend', HUE.pink), of: `of ${money(spend.limit, spend.currency)}` })
+  } else if (spend !== null && !spend.isOn) {
+    const value = money(spend.spent, spend.currency)
+    const of = `of ${money(spend.limit, spend.currency)}`
+
+    meters.push({
+      key: 'spend_limit',
+      short: 'Monthly',
+      title: 'Monthly spend',
+      percent: spend.percentUsed,
+      value,
+      of,
+      hint: 'off',
+      pace: 'Extra usage is off',
+      color: HUE.pink,
+      source: 'card',
+      detail: `Monthly spend: ${value} ${of}. Extra usage is switched off, so nothing is spent past your plan's limits.`,
+    })
   } else if (spend !== null) {
     const end = monthEnd(now)
     const left = end - now
@@ -1276,8 +1352,8 @@ function metersOf(usage: UsageSnapshot, account: PlanUsage | null, isHeld = fals
     })
   }
 
-  // A budget the person set, measured against what their chats cost this month: only where the
-  // account has no monthly figure of its own, which is always the truer one.
+  // A budget the person set, measured against what this account's chats cost this month: only
+  // where the account has no monthly figure of its own switched on, which is always the truer one.
   const hasMonthly = meters.some(meter => groupOf(meter.key) === 'monthly')
 
   if (!hasMonthly && budget !== undefined && budget.limit > 0) {
@@ -1297,7 +1373,7 @@ function metersOf(usage: UsageSnapshot, account: PlanUsage | null, isHeld = fals
     meters.push({
       key: 'budget',
       short: 'Monthly',
-      title: 'Monthly budget',
+      title: 'Monthly budget (estimate)',
       percent,
       value,
       of,
@@ -1306,8 +1382,8 @@ function metersOf(usage: UsageSnapshot, account: PlanUsage | null, isHeld = fals
       resets,
       color: HUE.pink,
       source: 'engine',
-      note: `Estimated at API rates across your Claude Code chats${counted}. Not what you're billed.`,
-      detail: [`Monthly budget: ${value} ${of}, estimated at API rates across your Claude Code chats${counted}.`, `${resets}.`, paceText(pace, ahead)]
+      note: `Estimated at API rates across this account's Claude Code chats${counted}. Not what you're billed.`,
+      detail: [`Monthly budget: ${value} ${of}, estimated at API rates across this account's Claude Code chats${counted}.`, `${resets}.`, paceText(pace, ahead)]
         .filter(Boolean)
         .join(' '),
     })
